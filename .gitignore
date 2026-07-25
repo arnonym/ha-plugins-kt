@@ -1,0 +1,20 @@
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+.kotlin/
+out/
+
+# Locally extracted PJSIP Java SWIG bindings (built via scripts/extract-pjsua2-bindings.sh
+# or scripts/build-pjsua2-bindings-native.sh)
+ha-sip/app/libs/
+ha-sip/app/native/
+deps/
+
+# IDE
+.idea/
+*.iml
+
+# env
+.env
+
+incoming.yaml

@@ -1,0 +1,31 @@
+services:
+    mosquitto:
+        image: eclipse-mosquitto:2
+        volumes:
+            - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro,Z
+            - mosquitto-data:/mosquitto/data
+        # ha-sip reaches this via network_mode: host, i.e. localhost:1883 --
+        # bound to localhost only, not exposed beyond this machine.
+        ports:
+            - "127.0.0.1:1883:1883"
+        restart: unless-stopped
+
+    ha-sip:
+        # Not started by a bare `docker compose up` -- only mosquitto is.
+        # Start it with `docker compose up ha-sip` (naming it explicitly
+        # activates its profile for that invocation) or `docker compose
+        # --profile app up`.
+        profiles:
+            - app
+        build:
+            context: ./ha-sip
+            dockerfile: Dockerfile
+            args:
+                BUILD_FROM: debian:bookworm
+        network_mode: host
+        env_file: ./.env
+        depends_on:
+            - mosquitto
+
+volumes:
+    mosquitto-data:
