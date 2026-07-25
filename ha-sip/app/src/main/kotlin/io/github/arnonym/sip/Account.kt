@@ -2,6 +2,7 @@ package io.github.arnonym.sip
 
 import io.github.arnonym.command.CommandHandler
 import io.github.arnonym.config.AnswerMode
+import io.github.arnonym.config.Constants
 import io.github.arnonym.config.GlobalOptions
 import io.github.arnonym.config.SipOptions
 import io.github.arnonym.config.TurnConnectionType
@@ -14,7 +15,6 @@ import io.github.arnonym.log.log
 import io.github.arnonym.menu.IncomingCallConfig
 import org.pjsip.pjsua2.AccountConfig
 import org.pjsip.pjsua2.AuthCredInfo
-import org.pjsip.pjsua2.Endpoint
 import org.pjsip.pjsua2.OnIncomingCallParam
 import org.pjsip.pjsua2.OnRegStateParam
 import org.pjsip.pjsua2.pj_turn_tp_type
@@ -39,7 +39,6 @@ data class MyAccountConfig(
 )
 
 class Account(
-    val endpoint: Endpoint,
     val config: MyAccountConfig,
     val commandHandler: CommandHandler<Call>,
     val eventSender: EventSender,
@@ -54,6 +53,7 @@ class Account(
         accountConfig.regConfig.registrarUri = config.registrarUri
         val credentials = AuthCredInfo("digest", config.realm, config.userName, 0, config.password)
         accountConfig.sipConfig.authCreds.add(credentials)
+        accountConfig.mediaConfig.transportConfig.port = config.globalOptions.rtpPort.toLong()
         accountConfig.natConfig.iceEnabled = config.options.enableIce
         accountConfig.natConfig.contactRewriteUse = if (config.options.contactRewriteUse) 1 else 0
         accountConfig.natConfig.viaRewriteUse = if (config.options.viaRewriteUse) 1 else 0
@@ -103,7 +103,6 @@ class Account(
 
         val incomingCall =
             Call(
-                endpoint = endpoint,
                 account = this,
                 callId = prm.callId,
                 uriToCall = null,
@@ -112,7 +111,7 @@ class Account(
                 eventSender = eventSender,
                 haConfig = haConfig,
                 haClient = haClient,
-                ringTimeout = io.github.arnonym.config.Constants.DEFAULT_RING_TIMEOUT,
+                ringTimeout = Constants.DEFAULT_RING_TIMEOUT,
                 webhooks = webhookToCall,
                 sipHeaders = sipHeaders,
             )
@@ -160,16 +159,11 @@ class Account(
             wholeMsg: String,
             headerNames: List<String>,
         ): Map<String, String?> {
-            val result = headerNames.associateWith<String, String?> { null }.toMutableMap()
-            for (line in wholeMsg.split("\r\n")) {
-                if (line.isBlank()) break
-                for (name in headerNames) {
-                    if (line.lowercase().startsWith("${name.lowercase()}:")) {
-                        result[name] = line.substringAfter(':').trim()
-                    }
-                }
+            val headerLines = wholeMsg.split("\r\n").takeWhile { it.isNotBlank() }
+            return headerNames.associateWith { name ->
+                headerLines.lastOrNull { it.lowercase().startsWith("${name.lowercase()}:") }
+                    ?.substringAfter(':')?.trim()
             }
-            return result
         }
 
         fun logAllSipHeaders(
@@ -177,13 +171,13 @@ class Account(
             wholeMsg: String,
         ) {
             log(accountIndex, "Available SIP headers:")
-            for (line in wholeMsg.split("\r\n")) {
-                if (line.isBlank()) break
-                if (':' in line) {
+            wholeMsg.split("\r\n")
+                .takeWhile { it.isNotBlank() }
+                .filter { ':' in it }
+                .forEach { line ->
                     val (name, value) = line.split(':', limit = 2)
                     log(accountIndex, "  ${name.trim()}: ${value.trim()}")
                 }
-            }
         }
 
         fun isNumberInList(
@@ -199,7 +193,7 @@ class Account(
                     else -> Regex.escape(part)
                 }
             val delimiter = Regex("\\{\\*}|\\{\\?}")
-            for (n in numberList) {
+            return numberList.any { n ->
                 // Split on {*}/{?} while keeping the delimiters themselves, mirroring Python's
                 // `re.split(r'(\{\*}|\{\?})', n)` (a capturing group keeps the matched delimiters
                 // in the resulting list).
@@ -212,9 +206,8 @@ class Account(
                 }
                 parts.add(n.substring(lastIndex))
                 val nRegex = "^" + parts.joinToString("") { mapToRegex(it) } + "$"
-                if (Regex(nRegex).matches(number)) return true
+                Regex(nRegex).matches(number)
             }
-            return false
         }
     }
 }

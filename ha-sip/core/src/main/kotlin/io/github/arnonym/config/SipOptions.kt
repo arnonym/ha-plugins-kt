@@ -166,11 +166,3 @@ private class SipOptionsCmd : NoOpCliktCommand(name = "sip_options") {
         help = "SIP response code used when rejecting incoming calls in reject mode (default: 603)",
     ).int().default(603)
 }
-
-private val BOOL_MAP: Map<String, Boolean> =
-    mapOf(
-        "enabled" to true, "enable" to true, "true" to true, "yes" to true, "on" to true, "1" to true,
-        "disabled" to false, "disable" to false, "false" to false, "no" to false, "off" to false, "0" to false,
-    )
-
-private fun tokenize(raw: String?): List<String> = raw?.trim()?.split(Regex("\\s+"))?.filter { it.isNotEmpty() } ?: emptyList()

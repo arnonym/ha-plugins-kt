@@ -14,6 +14,7 @@ data class GlobalOptions(
     val enableTcp: Boolean,
     val enableTls: Boolean,
     val tlsPort: Int,
+    val rtpPort: Int,
     val debugHeaders: Boolean,
     val enableMqtt: Boolean,
     val mqttAddress: String,
@@ -33,6 +34,7 @@ data class GlobalOptions(
                 enableTcp = cmd.enableTcp,
                 enableTls = cmd.enableTls,
                 tlsPort = cmd.tlsPort,
+                rtpPort = cmd.rtpPort,
                 debugHeaders = cmd.debugHeaders,
                 enableMqtt = cmd.enableMqtt,
                 mqttAddress = cmd.mqttAddress,
@@ -53,6 +55,7 @@ data class GlobalOptions(
         log(null, "TCP Enabled: $enableTcp")
         log(null, "TLS Enabled: $enableTls")
         log(null, "TLS Port: $tlsPort")
+        log(null, "RTP Port: $rtpPort")
         log(null, "MQTT Enabled: $enableMqtt")
         if (enableMqtt) {
             log(null, "MQTT Address: $mqttAddress")
@@ -85,6 +88,12 @@ private class GlobalOptionsCmd : NoOpCliktCommand(name = "global_options") {
         "--tls-port",
         help = "Port to use for TLS transport (default: 5061)",
     ).int().default(5061)
+    val rtpPort: Int by option(
+        "--rtp-port",
+        help = "First port used for RTP/RTCP media sockets (default: 4000)",
+        // 4000 restates pjsip's own default (DEFAULT_RTP_PORT in pjsua_core.c, applied by
+        // `pjsua_acc_config_default`), so passing it through unconditionally changes nothing.
+    ).int().default(4000)
     val debugHeaders: Boolean by option(
         "--debug-headers",
         help = "Enable debug printing of extracted SIP headers (default: disabled)",
@@ -118,11 +127,3 @@ private class GlobalOptionsCmd : NoOpCliktCommand(name = "global_options") {
         help = "MQTT topic to publish call state events to (default: hasip/state)",
     ).default("hasip/state")
 }
-
-private val BOOL_MAP: Map<String, Boolean> =
-    mapOf(
-        "enabled" to true, "enable" to true, "true" to true, "yes" to true, "on" to true, "1" to true,
-        "disabled" to false, "disable" to false, "false" to false, "no" to false, "off" to false, "0" to false,
-    )
-
-private fun tokenize(raw: String?): List<String> = raw?.trim()?.split(Regex("\\s+"))?.filter { it.isNotEmpty() } ?: emptyList()

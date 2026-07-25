@@ -31,14 +31,9 @@ class CallRegistryTest {
     }
 
     @Test
-    fun `getCallUnsafe throws for unknown identifier`() {
+    fun `getCall returns null for unknown identifier`() {
         val registry = CallRegistry<FakeCall>()
-        try {
-            registry.getCallUnsafe("missing")
-            error("expected exception")
-        } catch (e: NoSuchElementException) {
-            // expected
-        }
+        registry.getCall("missing") shouldBe null
     }
 
     @Test

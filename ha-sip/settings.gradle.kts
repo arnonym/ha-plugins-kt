@@ -4,3 +4,9 @@ rootProject.name = "ha-plugins-kt"
 
 include(":core")
 include(":app")
+
+// Docker-free, opt-in end-to-end suite: spawns two real ha-sip processes and puts
+// a direct-IP SIP call between them. Its `test` task is a no-op unless run with
+// -PintegrationTests (see integration-test/build.gradle.kts), so `./gradlew build`
+// and CI stay unaffected.
+include(":integration-test")

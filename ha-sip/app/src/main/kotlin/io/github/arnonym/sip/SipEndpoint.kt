@@ -23,6 +23,11 @@ fun createEndpoint(
     epConfig.logConfig.level = config.logLevel.toLong()
     epConfig.uaConfig.threadCnt = threadCount.toLong()
     epConfig.uaConfig.mainThreadOnly = false
+    // Never auto-close the (null) sound device. It clocks the conference bridge, and
+    // pjsua's default closes it after one second of silence -- taking the RTP transmit
+    // path down with it, so an RFC 2833 `send_dtmf` later in a quiet call is accepted,
+    // logged, and never actually put on the wire.
+    epConfig.medConfig.sndAutoCloseTime = -1
     if (config.nameServer.isNotEmpty()) {
         val nameserver = StringVector()
         config.nameServer.forEach { nameserver.add(it) }
@@ -60,4 +65,23 @@ fun createEndpoint(
     }
     endpoint.libStart()
     return endpoint
+}
+
+/**
+ * Registers the current thread with pjsip, once.
+ *
+ * Any thread of ours that calls into pjsua2 -- the call-events ticker, the stdin reader,
+ * the MQTT client's Netty threads -- has to be known to pjsip first, otherwise the call
+ * aborts on an assertion inside the library.
+ *
+ * The `libIsThreadRegistered` guard matters: `libRegisterThread` allocates a
+ * `pj_thread_desc` that is only freed at `libDestroy()`, so registering the same thread
+ * repeatedly (the MQTT callback runs on a rotating pool) would leak one per call.
+ */
+fun Endpoint.registerCurrentThread() {
+    try {
+        if (!libIsThreadRegistered()) libRegisterThread(Thread.currentThread().name)
+    } catch (e: Exception) {
+        log(null, "Warning: could not register thread '${Thread.currentThread().name}' with pjsip: ${e.message}")
+    }
 }

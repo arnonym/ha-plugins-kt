@@ -105,6 +105,14 @@ class CommandHandlerTest {
 
     private fun command(build: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit): JsonObject = buildJsonObject(build)
 
+    /** A handler with one call registered under "123", the fixture most scenarios want. */
+    private fun handlerWithCall(): Pair<CommandHandler<FakeCall>, FakeCall> {
+        val registry = CallRegistry<FakeCall>()
+        val call = FakeCall("123")
+        registry.registerCall("123", call, emptyList())
+        return newHandler(registry = registry) to call
+    }
+
     @Test
     fun `dial command invokes dial callback with defaults`() {
         var invoked: List<Any?>? = null
@@ -257,6 +265,125 @@ class CommandHandlerTest {
         )
         call.playedAudioFile shouldBe "/tmp/test.wav"
         call.lastScheduledPostAction shouldBe PostAction.Hangup
+    }
+
+    /**
+     * The parameter checks below all sit *inside* the `withCall` lambda, where `return`
+     * is a non-local return out of the enclosing handler. Each one asserts the call was
+     * left untouched, which is the only externally visible difference between "validated
+     * and rejected" and "validated wrongly and fell through".
+     */
+    @Test
+    fun `play_message without a message leaves the call untouched`() {
+        val (handler, call) = handlerWithCall()
+        handler.handleCommand(
+            command {
+                put("command", "play_message")
+                put("number", "123")
+            },
+            null,
+        )
+        call.playedMessage shouldBe null
+    }
+
+    @Test
+    fun `play_audio_file without an audio_file leaves the call untouched`() {
+        val (handler, call) = handlerWithCall()
+        handler.handleCommand(
+            command {
+                put("command", "play_audio_file")
+                put("number", "123")
+                put("post_action", "hangup")
+            },
+            null,
+        )
+        call.playedAudioFile shouldBe null
+        // The inline post_action is applied only after the parameters check out, so a
+        // rejected command must not leave a hangup armed on the call either.
+        call.lastScheduledPostAction shouldBe null
+    }
+
+    @Test
+    fun `start_recording rejects a relative path`() {
+        val (handler, call) = handlerWithCall()
+        handler.handleCommand(
+            command {
+                put("command", "start_recording")
+                put("number", "123")
+                put("recording_file", "relative/path.wav")
+            },
+            null,
+        )
+        call.startedRecording shouldBe null
+    }
+
+    @Test
+    fun `start_recording accepts an absolute path`() {
+        val (handler, call) = handlerWithCall()
+        handler.handleCommand(
+            command {
+                put("command", "start_recording")
+                put("number", "123")
+                put("recording_file", "/tmp/recording.wav")
+            },
+            null,
+        )
+        call.startedRecording shouldBe "/tmp/recording.wav"
+    }
+
+    @Test
+    fun `transfer without transfer_to leaves the call untouched`() {
+        val (handler, call) = handlerWithCall()
+        handler.handleCommand(
+            command {
+                put("command", "transfer")
+                put("number", "123")
+            },
+            null,
+        )
+        call.transferredTo shouldBe null
+    }
+
+    @Test
+    fun `stop_playback and stop_recording dispatch to the registered call`() {
+        val (handler, call) = handlerWithCall()
+        handler.handleCommand(
+            command {
+                put("command", "stop_playback")
+                put("number", "123")
+            },
+            null,
+        )
+        handler.handleCommand(
+            command {
+                put("command", "stop_recording")
+                put("number", "123")
+            },
+            null,
+        )
+        call.stoppedPlayback shouldBe true
+        call.stoppedRecording shouldBe true
+    }
+
+    @Test
+    fun `a command naming an unknown number reaches no call`() {
+        val (handler, call) = handlerWithCall()
+        handler.handleCommand(
+            command {
+                put("command", "play_message")
+                put("number", "not-the-registered-one")
+                put("message", "hello")
+            },
+            null,
+        )
+        call.playedMessage shouldBe null
+    }
+
+    @Test
+    fun `a call-directed command without a number reaches no call`() {
+        val (handler, call) = handlerWithCall()
+        handler.handleCommand(command { put("command", "stop_playback") }, null)
+        call.stoppedPlayback shouldBe false
     }
 
     @Test

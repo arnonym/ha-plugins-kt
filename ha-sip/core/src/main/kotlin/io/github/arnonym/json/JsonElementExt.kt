@@ -1,6 +1,5 @@
 package io.github.arnonym.json
 
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -12,17 +11,10 @@ import kotlinx.serialization.json.intOrNull
 
 fun JsonObject.stringOrNull(key: String): String? = this[key]?.stringValueOrNull()
 
-fun JsonObject.stringOrDefault(
-    key: String,
-    default: String,
-): String = stringOrNull(key) ?: default
-
 fun JsonObject.boolOrDefault(
     key: String,
     default: Boolean,
 ): Boolean = this[key]?.boolValueOrNull() ?: default
-
-fun JsonObject.boolOrNull(key: String): Boolean? = this[key]?.boolValueOrNull()
 
 fun JsonObject.intOrDefault(
     key: String,
@@ -60,9 +52,3 @@ fun JsonElement.boolValueOrNull(): Boolean? =
         is JsonPrimitive -> booleanOrNull ?: contentOrNull?.let { it.equals("true", ignoreCase = true) }
         else -> null
     }
-
-fun JsonObject.isNullOrMissing(key: String): Boolean = this[key] == null || this[key] is JsonNull
-
-fun JsonElement?.orEmptyObject(): JsonObject = (this as? JsonObject) ?: JsonObject(emptyMap())
-
-fun JsonArray?.orEmpty(): JsonArray = this ?: JsonArray(emptyList())

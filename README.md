@@ -104,6 +104,7 @@ webhook:
   --tls {enabled,enable,true,yes,on,1,disabled,disable,false,no,off,0}
                         Enable or disable TLS transport (default: disabled)
   --tls-port TLS_PORT   Port to use for TLS transport (default: 5061)
+  --rtp-port RTP_PORT   First port used for RTP/RTCP media sockets (default: 4000)
   --debug-headers {enabled,enable,true,yes,on,1,disabled,disable,false,no,off,0}
                         Enable debug printing of all available SIP headers (default: disabled)
   --enable-mqtt         Enable MQTT as a command source (default: disabled)

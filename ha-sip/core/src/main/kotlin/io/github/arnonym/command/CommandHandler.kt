@@ -26,8 +26,6 @@ class CommandHandler<C : CallHandle>(
 
     fun getCall(key: String): C? = callRegistry.getCall(key)
 
-    fun getCallUnsafe(key: String): C = callRegistry.getCallUnsafe(key)
-
     fun registerCall(
         callbackId: String,
         call: C,
@@ -53,9 +51,9 @@ class CommandHandler<C : CallHandle>(
             "send_dtmf" -> handleSendDtmf(command, number)
             "play_audio_file" -> handlePlayAudioFile(command, number)
             "play_message" -> handlePlayMessage(command, number)
-            "stop_playback" -> handleStopPlayback(number)
+            "stop_playback" -> withCall("stop_playback", number) { it.stopPlayback() }
             "start_recording" -> handleStartRecording(command, number)
-            "stop_recording" -> handleStopRecording(number)
+            "stop_recording" -> withCall("stop_recording", number) { it.stopRecording() }
             "state" -> callRegistry.output()
             "quit" -> {
                 log(null, "Quit.")
@@ -63,6 +61,42 @@ class CommandHandler<C : CallHandle>(
             }
             else -> log(null, "Error: Unknown command: $verb")
         }
+    }
+
+    /**
+     * Resolves [number] to a live call and runs [body] on it, or logs why it could not.
+     *
+     * A single registry lookup on purpose: calls are forgotten from a pjsip worker thread
+     * (`onCallState`, DISCONNECTED) while commands arrive on the stdin/MQTT threads, so a
+     * "does it exist" check followed by a separate "give it to me" can lose the race in
+     * between and throw out of the command loop.
+     */
+    private inline fun withCall(
+        verb: String,
+        number: String?,
+        announce: Boolean = false,
+        body: (C) -> Unit,
+    ) {
+        val identifier = requireNumber(verb, number) ?: return
+        if (announce) log(null, "Got \"$verb\" command for $identifier")
+        val call = callRegistry.getCall(identifier)
+        if (call == null) {
+            callNotInProgressError(identifier)
+            return
+        }
+        body(call)
+    }
+
+    /** The `number` every call-directed command needs, or null (already logged) if absent. */
+    private fun requireNumber(
+        verb: String,
+        number: String?,
+    ): String? {
+        if (number.isNullOrEmpty()) {
+            log(null, "Error: Missing number for command \"$verb\"")
+            return null
+        }
+        return number
     }
 
     private fun handleCallService(command: JsonObject) {
@@ -86,75 +120,46 @@ class CommandHandler<C : CallHandle>(
         command: JsonObject,
         number: String?,
     ) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"dial\"")
-            return
-        }
-        log(null, "Got \"dial\" command for $number")
-        if (isActive(number)) {
-            log(null, "Warning: call already in progress: $number")
+        val identifier = requireNumber("dial", number) ?: return
+        log(null, "Got \"dial\" command for $identifier")
+        if (isActive(identifier)) {
+            log(null, "Warning: call already in progress: $identifier")
             return
         }
         val menu = command.objectOrNull("menu")
         val ringTimeout = command.doubleOrDefault("ring_timeout", Constants.DEFAULT_RING_TIMEOUT)
         val sipAccountNumber = command.intOrDefault("sip_account", -1)
         val webhooks = WebhookToCall.fromJson(command.objectOrNull("webhook_to_call"))
-        dial(sipAccountNumber, number, menu, ringTimeout, webhooks)
+        dial(sipAccountNumber, identifier, menu, ringTimeout, webhooks)
     }
 
     private fun handleHangup(
         command: JsonObject,
         number: String?,
-    ) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"hangup\"")
-            return
-        }
-        log(null, "Got \"hangup\" command for $number")
-        if (!isActive(number)) {
-            callNotInProgressError(number)
-            return
-        }
-        val sipCode = command.intOrDefault("sip_code", 0)
-        getCallUnsafe(number).hangupCall(sipCode)
+    ) = withCall("hangup", number, announce = true) { call ->
+        call.hangupCall(command.intOrDefault("sip_code", 0))
     }
 
     private fun handleAnswer(
         command: JsonObject,
         number: String?,
-    ) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"answer\"")
-            return
-        }
-        log(null, "Got \"answer\" command for $number")
-        if (!isActive(number)) {
-            callNotInProgressError(number)
-            return
-        }
+    ) = withCall("answer", number, announce = true) { call ->
         val menu = command.objectOrNull("menu")
         val webhooks = WebhookToCall.fromJson(command.objectOrNull("webhook_to_call"))
-        getCallUnsafe(number).answerCall(menu, webhooks)
+        call.answerCall(menu, webhooks)
     }
 
     private fun handleTransfer(
         command: JsonObject,
         number: String?,
     ) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"transfer\"")
-            return
-        }
+        val identifier = requireNumber("transfer", number) ?: return
         val transferTo = command.stringOrNull("transfer_to")
         if (transferTo.isNullOrEmpty()) {
             log(null, "Error: Missing transfer_to for command \"transfer_to\"")
             return
         }
-        if (!isActive(number)) {
-            callNotInProgressError(number)
-            return
-        }
-        getCallUnsafe(number).transfer(transferTo)
+        withCall("transfer", identifier) { it.transfer(transferTo) }
     }
 
     private fun handleBridgeAudio(
@@ -188,12 +193,9 @@ class CommandHandler<C : CallHandle>(
         command: JsonObject,
         number: String?,
     ) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"send_dtmf\"")
-            return
-        }
+        val identifier = requireNumber("send_dtmf", number) ?: return
         val digits = command.stringOrNull("digits")
-        val methodRaw = command.stringOrNull("method") ?: "in_band"
+        val methodRaw = command.stringOrNull("method") ?: DtmfMethod.IN_BAND.wireValue
         val method = DtmfMethod.fromWireValueOrNull(methodRaw)
         if (method == null) {
             log(null, "Error: method must be one of in_band, rfc2833, sip_info")
@@ -203,109 +205,59 @@ class CommandHandler<C : CallHandle>(
             log(null, "Error: Missing digits for command \"send_dtmf\"")
             return
         }
-        log(null, "Got \"send_dtmf\" command for $number")
-        if (!isActive(number)) {
-            callNotInProgressError(number)
-            return
-        }
-        getCallUnsafe(number).sendDtmf(digits, method)
+        withCall("send_dtmf", identifier, announce = true) { it.sendDtmf(digits, method) }
     }
 
     private fun handlePlayAudioFile(
         command: JsonObject,
         number: String?,
     ) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"play_audio_file\"")
-            return
+        withCall("play_audio_file", number) { call ->
+            val audioFile = command.stringOrNull("audio_file")
+            if (audioFile.isNullOrEmpty()) {
+                log(null, "Error: Missing parameter \"audio_file\" for command \"play_audio_file\"")
+                return
+            }
+            val cacheAudio = command.boolOrDefault("cache_audio", false)
+            val waitForAudioToFinish = command.boolOrDefault("wait_for_audio_to_finish", false)
+            applyInlinePostAction(command, call)
+            call.playAudioFile(audioFile, cacheAudio, waitForAudioToFinish)
         }
-        if (!isActive(number)) {
-            callNotInProgressError(number)
-            return
-        }
-        val call = getCallUnsafe(number)
-        val audioFile = command.stringOrNull("audio_file")
-        if (audioFile.isNullOrEmpty()) {
-            log(null, "Error: Missing parameter \"audio_file\" for command \"play_audio_file\"")
-            return
-        }
-        val cacheAudio = command.boolOrDefault("cache_audio", false)
-        val waitForAudioToFinish = command.boolOrDefault("wait_for_audio_to_finish", false)
-        applyInlinePostAction(command, call)
-        call.playAudioFile(audioFile, cacheAudio, waitForAudioToFinish)
     }
 
     private fun handlePlayMessage(
         command: JsonObject,
         number: String?,
     ) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"play_message\"")
-            return
+        withCall("play_message", number) { call ->
+            var message = command.stringOrNull("message")
+            if (message.isNullOrEmpty()) {
+                log(null, "Error: Missing parameter \"message\" for command \"play_message\"")
+                return
+            }
+            if (command.boolOrDefault("handle_as_template", false)) {
+                message = haClient.renderTemplate(message)
+            }
+            val ttsLanguage = command.stringOrNull("tts_language") ?: defaultTtsLanguage
+            val cacheAudio = command.boolOrDefault("cache_audio", false)
+            val waitForAudioToFinish = command.boolOrDefault("wait_for_audio_to_finish", false)
+            applyInlinePostAction(command, call)
+            call.playMessage(message, ttsLanguage, cacheAudio, waitForAudioToFinish)
         }
-        if (!isActive(number)) {
-            callNotInProgressError(number)
-            return
-        }
-        val call = getCallUnsafe(number)
-        var message = command.stringOrNull("message")
-        if (message.isNullOrEmpty()) {
-            log(null, "Error: Missing parameter \"message\" for command \"play_message\"")
-            return
-        }
-        val handleAsTemplate = command.boolOrDefault("handle_as_template", false)
-        if (handleAsTemplate) {
-            message = haClient.renderTemplate(message)
-        }
-        val ttsLanguage = command.stringOrNull("tts_language") ?: defaultTtsLanguage
-        val cacheAudio = command.boolOrDefault("cache_audio", false)
-        val waitForAudioToFinish = command.boolOrDefault("wait_for_audio_to_finish", false)
-        applyInlinePostAction(command, call)
-        call.playMessage(message, ttsLanguage, cacheAudio, waitForAudioToFinish)
-    }
-
-    private fun handleStopPlayback(number: String?) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"stop_playback\"")
-            return
-        }
-        if (!isActive(number)) {
-            callNotInProgressError(number)
-            return
-        }
-        getCallUnsafe(number).stopPlayback()
     }
 
     private fun handleStartRecording(
         command: JsonObject,
         number: String?,
     ) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"start_recording\"")
-            return
+        withCall("start_recording", number) { call ->
+            val recordingFile = command.stringOrNull("recording_file")
+            if (recordingFile.isNullOrEmpty() || !File(recordingFile).isAbsolute) {
+                log(null, "Error: Missing recording_file or path not absolute for command \"start_recording\"")
+                return
+            }
+            call.startRecording(recordingFile)
         }
-        if (!isActive(number)) {
-            callNotInProgressError(number)
-            return
-        }
-        val recordingFile = command.stringOrNull("recording_file")
-        if (recordingFile.isNullOrEmpty() || !File(recordingFile).isAbsolute) {
-            log(null, "Error: Missing recording_file or path not absolute for command \"start_recording\"")
-            return
-        }
-        getCallUnsafe(number).startRecording(recordingFile)
-    }
-
-    private fun handleStopRecording(number: String?) {
-        if (number.isNullOrEmpty()) {
-            log(null, "Error: Missing number for command \"stop_recording\"")
-            return
-        }
-        if (!isActive(number)) {
-            callNotInProgressError(number)
-            return
-        }
-        getCallUnsafe(number).stopRecording()
     }
 
     /** Shared `post_action` handling for `play_audio_file`/`play_message` (only "hangup" is supported inline). */

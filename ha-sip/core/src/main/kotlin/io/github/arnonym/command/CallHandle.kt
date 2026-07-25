@@ -11,8 +11,6 @@ enum class DtmfMethod(val wireValue: String) {
     ;
 
     companion object {
-        val default = IN_BAND
-
         fun fromWireValueOrNull(value: String?): DtmfMethod? = entries.find { it.wireValue == value }
     }
 }

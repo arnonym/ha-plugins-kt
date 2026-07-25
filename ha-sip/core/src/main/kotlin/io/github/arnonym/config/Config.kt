@@ -1,5 +1,8 @@
 package io.github.arnonym.config
 
+/** ha-sip reads three fixed sets of SIP account variables: `SIP1_*`, `SIP2_*`, `SIP3_*`. */
+val SIP_ACCOUNT_INDICES = 1..3
+
 data class SipAccountEnv(
     val enabled: String,
     val idUri: String,
@@ -71,7 +74,7 @@ data class AppConfig(
                 nameServer = env("NAME_SERVER"),
                 cacheDir = env("CACHE_DIR"),
                 globalOptions = env("GLOBAL_OPTIONS"),
-                sipAccounts = mapOf(1 to sipAccountEnv(1), 2 to sipAccountEnv(2), 3 to sipAccountEnv(3)),
+                sipAccounts = SIP_ACCOUNT_INDICES.associateWith { sipAccountEnv(it) },
                 tts =
                     TtsEnv(
                         engineId = env("TTS_ENGINE_ID"),

@@ -7,10 +7,7 @@ import kotlinx.serialization.json.JsonObject
 class SensorEventHandler(private val sensorUpdater: SensorUpdates) {
     private val callDirections = mutableMapOf<Int, String>()
 
-    fun handleEvent(
-        event: JsonObject,
-        webhookId: String? = null,
-    ) {
+    fun handleEvent(event: JsonObject) {
         val eventType = event["event"]?.stringValueOrNull()
         val sipAccount = event["sip_account"]?.intValueOrNull() ?: return
         when (eventType) {

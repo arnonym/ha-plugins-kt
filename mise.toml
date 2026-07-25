@@ -24,6 +24,11 @@ description = "Run just the fast, pjsip-free :core tests (no native bindings nee
 run = "./gradlew :core:test"
 dir = "ha-sip"
 
+[tasks.integration-test]
+description = "Run the two-instance direct-IP SIP suite (needs `mise run extract-bindings` + ffmpeg on PATH)"
+run = "./gradlew :integration-test:test -PintegrationTests"
+dir = "ha-sip"
+
 [tasks.format]
 description = "Auto-format Kotlin sources (ktlint)"
 run = "./gradlew ktlintFormat"

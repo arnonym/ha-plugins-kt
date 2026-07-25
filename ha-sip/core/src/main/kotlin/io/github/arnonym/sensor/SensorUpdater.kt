@@ -59,6 +59,27 @@ class SensorUpdater(
         haClient.updateSensorState(entityId, state, filtered)
     }
 
+    /**
+     * The who-called-whom attributes shared by the "call active" and "last call" sensors.
+     *
+     * Each URI is published twice: once under its `caller`/`called` name and once under
+     * `remote_uri`/`local_uri`. The first pair is deprecated but still in the webhook
+     * payload contract, so both have to stay.
+     */
+    private fun callUriAttributes(callInfo: JsonObject): Map<String, JsonElement?> {
+        fun uri(key: String) = callInfo.stringOrNull(key)?.toJson()
+        return mapOf(
+            "caller" to uri("remote_uri"),
+            "called" to uri("local_uri"),
+            "parsed_caller" to uri("parsed_remote_uri"),
+            "parsed_called" to uri("parsed_local_uri"),
+            "remote_uri" to uri("remote_uri"),
+            "local_uri" to uri("local_uri"),
+            "parsed_remote_uri" to uri("parsed_remote_uri"),
+            "parsed_local_uri" to uri("parsed_local_uri"),
+        )
+    }
+
     override fun setCallActive(
         accountIndex: Int,
         callInfo: JsonObject,
@@ -68,19 +89,13 @@ class SensorUpdater(
             mapOf(
                 "friendly_name" to "SIP Account $accountIndex".toJson(),
                 "icon" to "mdi:phone-in-talk".toJson(),
-                "caller" to callInfo.stringOrNull("remote_uri")?.toJson(),
-                "called" to callInfo.stringOrNull("local_uri")?.toJson(),
-                "parsed_caller" to callInfo.stringOrNull("parsed_remote_uri")?.toJson(),
-                "parsed_called" to callInfo.stringOrNull("parsed_local_uri")?.toJson(),
-                "remote_uri" to callInfo.stringOrNull("remote_uri")?.toJson(),
-                "local_uri" to callInfo.stringOrNull("local_uri")?.toJson(),
-                "parsed_remote_uri" to callInfo.stringOrNull("parsed_remote_uri")?.toJson(),
-                "parsed_local_uri" to callInfo.stringOrNull("parsed_local_uri")?.toJson(),
-                "sip_account" to callInfo["sip_account"],
-                "call_id" to callInfo.stringOrNull("call_id")?.toJson(),
-                "internal_id" to callInfo.stringOrNull("internal_id")?.toJson(),
-                "headers" to (callInfo.objectOrNull("headers") ?: JsonObject(emptyMap())),
-            )
+            ) + callUriAttributes(callInfo) +
+                mapOf(
+                    "sip_account" to callInfo["sip_account"],
+                    "call_id" to callInfo.stringOrNull("call_id")?.toJson(),
+                    "internal_id" to callInfo.stringOrNull("internal_id")?.toJson(),
+                    "headers" to (callInfo.objectOrNull("headers") ?: JsonObject(emptyMap())),
+                )
         updateSensor(entityId(accountIndex), "true", attributes)
     }
 
@@ -129,23 +144,21 @@ class SensorUpdater(
                 "incoming" -> "mdi:phone-incoming"
                 else -> "mdi:phone-outgoing"
             }
-        val attributes =
-            mutableMapOf<String, JsonElement?>(
+        val base =
+            mapOf<String, JsonElement?>(
                 "friendly_name" to "SIP Last Call $accountIndex".toJson(),
                 "icon" to icon.toJson(),
             )
-        if (callInfo != null) {
-            attributes["caller"] = callInfo.stringOrNull("remote_uri")?.toJson()
-            attributes["called"] = callInfo.stringOrNull("local_uri")?.toJson()
-            attributes["parsed_caller"] = callInfo.stringOrNull("parsed_remote_uri")?.toJson()
-            attributes["parsed_called"] = callInfo.stringOrNull("parsed_local_uri")?.toJson()
-            attributes["remote_uri"] = callInfo.stringOrNull("remote_uri")?.toJson()
-            attributes["local_uri"] = callInfo.stringOrNull("local_uri")?.toJson()
-            attributes["parsed_remote_uri"] = callInfo.stringOrNull("parsed_remote_uri")?.toJson()
-            attributes["parsed_local_uri"] = callInfo.stringOrNull("parsed_local_uri")?.toJson()
-            attributes["call_id"] = callInfo.stringOrNull("call_id")?.toJson()
-            attributes["timestamp"] = LocalDateTime.now().toString().toJson()
-        }
+        val attributes =
+            if (callInfo == null) {
+                base
+            } else {
+                base + callUriAttributes(callInfo) +
+                    mapOf(
+                        "call_id" to callInfo.stringOrNull("call_id")?.toJson(),
+                        "timestamp" to LocalDateTime.now().toString().toJson(),
+                    )
+            }
         updateSensor(lastCallEntityId(accountIndex), direction, attributes)
     }
 

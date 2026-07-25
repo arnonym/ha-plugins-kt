@@ -1,8 +1,10 @@
 package io.github.arnonym
 
 import io.github.arnonym.command.CommandHandler
+import io.github.arnonym.config.AnswerMode
 import io.github.arnonym.config.AppConfig
 import io.github.arnonym.config.GlobalOptions
+import io.github.arnonym.config.SIP_ACCOUNT_INDICES
 import io.github.arnonym.config.SipOptions
 import io.github.arnonym.config.convertToDouble
 import io.github.arnonym.config.convertToInt
@@ -19,17 +21,22 @@ import io.github.arnonym.sensor.SensorEventHandler
 import io.github.arnonym.sensor.SensorUpdater
 import io.github.arnonym.sip.Account
 import io.github.arnonym.sip.Call
+import io.github.arnonym.sip.CallDisposal
 import io.github.arnonym.sip.EndpointConfig
 import io.github.arnonym.sip.MyAccountConfig
 import io.github.arnonym.sip.createEndpoint
 import io.github.arnonym.sip.makeCall
+import io.github.arnonym.sip.registerCurrentThread
 import io.github.arnonym.state.CallRegistry
 import io.github.arnonym.yaml.parseYamlToJsonElement
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import org.pjsip.pjsua2.Endpoint
 import java.io.File
 import java.net.URI
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.system.exitProcess
@@ -88,6 +95,115 @@ private fun logHostnameResolution(
     }
 }
 
+/** The `SIP<n>_*` accounts that are switched on, in index order, keyed by index. */
+private fun enabledAccountConfigs(
+    config: AppConfig,
+    globalOptions: GlobalOptions,
+): Map<Int, MyAccountConfig> =
+    SIP_ACCOUNT_INDICES.associateWith { index ->
+        val env = config.sipAccounts.getValue(index)
+        MyAccountConfig(
+            enabled = env.enabled.equals("true", ignoreCase = true),
+            index = index,
+            idUri = env.idUri,
+            registrarUri = env.registrarUri,
+            realm = env.realm,
+            userName = env.userName,
+            password = env.password,
+            mode = AnswerMode.getOrElse(env.answerMode, AnswerMode.LISTEN),
+            settleTime = convertToDouble(env.settleTime, 1.0),
+            incomingCallConfig = loadMenuFromFile(env.incomingCallFile, index),
+            options = SipOptions.parse(env.options, index),
+            globalOptions = globalOptions,
+        )
+    }.filterValues { it.enabled }
+
+/** Registers each enabled account with pjsua. The lowest-numbered one becomes the default. */
+private fun createAccounts(
+    accountConfigs: Map<Int, MyAccountConfig>,
+    commandHandler: CommandHandler<Call>,
+    eventSender: EventSender,
+    haConfig: HaConfig,
+    haClient: HaClient,
+    sensorUpdater: SensorUpdater,
+): Map<Int, Account> =
+    accountConfigs.entries.mapIndexed { position, (index, accountConfig) ->
+        val account =
+            Account(
+                config = accountConfig,
+                commandHandler = commandHandler,
+                eventSender = eventSender,
+                haConfig = haConfig,
+                haClient = haClient,
+                makeDefault = position == 0,
+                onRegStateCallback = { accountIndex, code, reason ->
+                    sensorUpdater.updateRegistrationStatus(accountIndex, code, reason)
+                },
+            )
+        account.init()
+        index to account
+    }.toMap()
+
+/** Reads newline-delimited JSON commands from stdin until the stream closes. */
+private fun startStdinReader(
+    endpoint: Endpoint,
+    commandHandler: CommandHandler<Call>,
+) {
+    thread(isDaemon = true, name = "stdin-command-reader") {
+        endpoint.registerCurrentThread()
+        System.`in`.bufferedReader().forEachLine { line ->
+            if (line.isBlank()) return@forEachLine
+            val parsed =
+                try {
+                    Json.parseToJsonElement(line) as? JsonObject
+                } catch (e: Exception) {
+                    null
+                }
+            if (parsed == null) {
+                println("Could not deserialize JSON: $line")
+                return@forEachLine
+            }
+            try {
+                commandHandler.handleCommand(parsed, null)
+            } catch (e: Exception) {
+                log(null, "Error handling command: ${e.message}")
+            }
+        }
+    }
+}
+
+/**
+ * Starts the 10 ms housekeeping tick that drives every live call's state machine.
+ *
+ * Runs on a single thread registered with pjsip, because the transitions it performs
+ * (answer, hangup, starting a player) call into pjsua2.
+ */
+private fun startCallTicker(
+    endpoint: Endpoint,
+    callRegistry: CallRegistry<Call>,
+): ScheduledExecutorService {
+    val executor =
+        Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread({
+                endpoint.registerCurrentThread()
+                runnable.run()
+            }, "call-events-ticker").apply { isDaemon = true }
+        }
+    executor.scheduleWithFixedDelay({
+        // Before the calls themselves: destroying a finished call's pjsua2 object is only
+        // safe while its id slot is idle, and servicing a live call can start a new one.
+        CallDisposal.drain()
+        callRegistry.currentCalls().forEach { call ->
+            try {
+                call.handleEvents()
+            } catch (e: Exception) {
+                log(null, "Error handling call events: ${e.message}")
+            }
+        }
+    }, 0, 10, TimeUnit.MILLISECONDS)
+    return executor
+}
+
 fun main(args: Array<String>) {
     if (args.contains("--help") || args.contains("-h")) {
         GlobalOptions.printHelp()
@@ -124,6 +240,7 @@ fun main(args: Array<String>) {
         )
     val callRegistry = CallRegistry<Call>()
     val endpoint = createEndpoint(endpointConfig)
+    val shutdownLatch = CountDownLatch(1)
     val haClient = HaClient(haConfig)
     val eventSender = EventSender()
     if (haConfig.ttsConfig.debugPrint) {
@@ -146,67 +263,39 @@ fun main(args: Array<String>) {
                 if (account == null) {
                     log(null, "Error: no SIP account available to place call")
                 } else {
-                    makeCall(endpoint, account, number, menu, commandHandler, eventSender, haConfig, haClient, ringTimeout, webhooks)
+                    makeCall(account, number, menu, commandHandler, eventSender, haConfig, haClient, ringTimeout, webhooks)
                 }
             },
-            quit = {
-                endpoint.libDestroy()
-                exitProcess(0)
-            },
+            // Hands shutdown back to the main thread. This runs on the stdin or MQTT
+            // thread, and `libDestroy()` should not be called from one of those.
+            quit = { shutdownLatch.countDown() },
         )
 
-    val accountConfigs =
-        (1..3).associateWith { index ->
-            val env = config.sipAccounts.getValue(index)
-            MyAccountConfig(
-                enabled = env.enabled.equals("true", ignoreCase = true),
-                index = index,
-                idUri = env.idUri,
-                registrarUri = env.registrarUri,
-                realm = env.realm,
-                userName = env.userName,
-                password = env.password,
-                mode = io.github.arnonym.config.AnswerMode.getOrElse(env.answerMode, io.github.arnonym.config.AnswerMode.LISTEN),
-                settleTime = convertToDouble(env.settleTime, 1.0),
-                incomingCallConfig = loadMenuFromFile(env.incomingCallFile, index),
-                options = SipOptions.parse(env.options, index),
-                globalOptions = globalOptions,
-            )
-        }
-    val enabledAccountIndices = accountConfigs.filterValues { it.enabled }.keys.toList()
+    val enabledAccountConfigs = enabledAccountConfigs(config, globalOptions)
 
-    val sensorEntityPrefix = config.sensor.entityPrefix.ifEmpty { "ha_sip" }
     val sensorConfig =
         SensorConfig(
             enabled = config.sensor.enabled.equals("true", ignoreCase = true),
-            entityPrefix = sensorEntityPrefix,
+            entityPrefix = config.sensor.entityPrefix.ifEmpty { "ha_sip" },
         )
-    val sensorUpdater = SensorUpdater(haClient, sensorConfig, enabledAccountIndices)
+    val sensorUpdater = SensorUpdater(haClient, sensorConfig, enabledAccountConfigs.keys.toList())
 
-    var isFirstEnabledAccount = true
-    for ((index, accountConfig) in accountConfigs) {
-        if (!accountConfig.enabled) continue
-        val account =
-            Account(
-                endpoint = endpoint,
-                config = accountConfig,
-                commandHandler = commandHandler,
-                eventSender = eventSender,
-                haConfig = haConfig,
-                haClient = haClient,
-                makeDefault = isFirstEnabledAccount,
-                onRegStateCallback = { accountIndex, code, reason ->
-                    sensorUpdater.updateRegistrationStatus(accountIndex, code, reason)
-                },
-            )
-        account.init()
-        accounts[index] = account
-        isFirstEnabledAccount = false
-    }
+    accounts += createAccounts(enabledAccountConfigs, commandHandler, eventSender, haConfig, haClient, sensorUpdater)
 
     val mqttClient =
         if (globalOptions.enableMqtt) {
-            MqttClient(globalOptions, onCommand = { command -> commandHandler.handleCommand(command, null) }).also { it.connect() }
+            MqttClient(
+                globalOptions,
+                onCommand = { command ->
+                    // Arrives on a HiveMQ Netty thread, which may then call into pjsua2.
+                    endpoint.registerCurrentThread()
+                    try {
+                        commandHandler.handleCommand(command, null)
+                    } catch (e: Exception) {
+                        log(null, "Error handling command: ${e.message}")
+                    }
+                },
+            ).also { it.connect() }
         } else {
             null
         }
@@ -217,26 +306,24 @@ fun main(args: Array<String>) {
     eventSender.registerSender { event, _ -> sensorEventHandler.handleEvent(event) }
     sensorUpdater.initializeSensors()
 
-    thread(isDaemon = true, name = "stdin-command-reader") {
-        System.`in`.bufferedReader().forEachLine { line ->
-            if (line.isBlank()) return@forEachLine
-            try {
-                val parsed = Json.parseToJsonElement(line) as? JsonObject
-                if (parsed != null) commandHandler.handleCommand(parsed, null) else println("Could not deserialize JSON: $line")
-            } catch (e: Exception) {
-                println("Could not deserialize JSON: $line")
-            }
-        }
-    }
+    startStdinReader(endpoint, commandHandler)
+    val eventsExecutor = startCallTicker(endpoint, callRegistry)
 
-    val eventsExecutor = Executors.newSingleThreadScheduledExecutor { runnable -> Thread(runnable, "call-events-ticker") }
-    eventsExecutor.scheduleWithFixedDelay({
-        callRegistry.currentCalls().forEach { call ->
-            try {
-                call.handleEvents()
-            } catch (e: Exception) {
-                log(null, "Error handling call events: ${e.message}")
-            }
-        }
-    }, 0, 10, TimeUnit.MILLISECONDS)
+    // Single deterministic "we are up" marker, emitted once everything that can
+    // accept work (SIP transports, accounts, MQTT, stdin) has been wired up. The
+    // integration-test harness waits for exactly this line before driving calls.
+    log(null, "ha-sip started, listening on port ${endpointConfig.port}")
+
+    // Blocks until a `quit` command arrives. That command runs on the stdin or MQTT
+    // thread, and `libDestroy()` should not be called from one of those -- so it hands
+    // shutdown back here, to the main thread pjsua registered during `libCreate()`.
+    shutdownLatch.await()
+
+    log(null, "Shutting down.")
+    // Ticker first: guarantees it is not inside a pjsua2 call when the library goes away.
+    eventsExecutor.shutdown()
+    eventsExecutor.awaitTermination(5, TimeUnit.SECONDS)
+    mqttClient?.disconnect()
+    endpoint.libDestroy()
+    exitProcess(0)
 }

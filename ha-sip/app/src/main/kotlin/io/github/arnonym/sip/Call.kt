@@ -7,6 +7,7 @@ import io.github.arnonym.audio.convertAudioStreamToWavFile
 import io.github.arnonym.command.CallHandle
 import io.github.arnonym.command.CommandHandler
 import io.github.arnonym.command.DtmfMethod
+import io.github.arnonym.config.AnswerMode
 import io.github.arnonym.config.Constants
 import io.github.arnonym.event.CallDirection
 import io.github.arnonym.event.CallInfo
@@ -17,6 +18,7 @@ import io.github.arnonym.event.WebhookToCall
 import io.github.arnonym.event.triggerWebhook
 import io.github.arnonym.ha.HaClient
 import io.github.arnonym.ha.HaConfig
+import io.github.arnonym.ha.TtsResult
 import io.github.arnonym.log.log
 import io.github.arnonym.menu.Menu
 import io.github.arnonym.menu.PostAction
@@ -27,7 +29,6 @@ import org.pjsip.pjsua2.AudioMedia
 import org.pjsip.pjsua2.AudioMediaRecorder
 import org.pjsip.pjsua2.CallOpParam
 import org.pjsip.pjsua2.CallSendDtmfParam
-import org.pjsip.pjsua2.Endpoint
 import org.pjsip.pjsua2.OnCallMediaStateParam
 import org.pjsip.pjsua2.OnCallReplaceRequestParam
 import org.pjsip.pjsua2.OnCallReplacedParam
@@ -51,7 +52,6 @@ import org.pjsip.pjsua2.Call as PjCall
 
 /** Direct port of call.py's top-level `make_call`. */
 fun makeCall(
-    endpoint: Endpoint,
     account: Account,
     uriToCall: String,
     menu: JsonObject?,
@@ -64,7 +64,7 @@ fun makeCall(
 ): Call {
     val newCall =
         Call(
-            endpoint, account, PJSUA_INVALID_ID, uriToCall, menu, commandHandler, eventSender, haConfig, haClient,
+            account, PJSUA_INVALID_ID, uriToCall, menu, commandHandler, eventSender, haConfig, haClient,
             ringTimeout, webhooks, emptyMap(),
         )
     val callParam = CallOpParam(true)
@@ -76,7 +76,6 @@ fun makeCall(
 const val PJSUA_INVALID_ID = -1
 
 class Call(
-    private val endpoint: Endpoint,
     val account: Account,
     callId: Int,
     private val uriToCall: String?,
@@ -89,7 +88,50 @@ class Call(
     private var webhooks: WebhookToCall?,
     private var sipHeaders: Map<String, String?> = emptyMap(),
 ) : PjCall(account, callId), CallHandle {
+    /**
+     * Guards this call's mutable state.
+     *
+     * Lock-ordering rule, and it is not optional: **pjsua2 call operations must never
+     * be invoked while this lock is held.** pjsip delivers `onCallState`,
+     * `onCallMediaState` and `onDtmfDigit` from its own worker threads *while holding
+     * the dialog lock*, and those callbacks then take this lock. A thread that holds
+     * this lock and calls `answer`/`hangup`/`xfer`/`sendDtmf` -- each of which needs
+     * the dialog lock via pjsua's `acquire_call()` -- inverts that order. The result is
+     * a deadlock broken only by pjsua's 2 s acquire timeout, which then *drops the
+     * operation*: an incoming call that loses its `200 OK` this way never connects.
+     *
+     * So nothing calls pjsua2 under this lock. Queue it with [deferSipCall] instead; the
+     * tick runs the queue in [handleEvents], outside the lock and on a thread pjsip knows
+     * about. That the *tick* is the only drainer is the point -- it means no caller has to
+     * reason about whether it happens to be the outermost lock holder, or whether its own
+     * thread is one pjsip would accept, which is exactly what a TTS callback is not.
+     *
+     * The cost is that an `answer`/`hangup`/`xfer`/`sendDtmf` waits for the next tick, at
+     * most 10 ms. Against SIP timescales that is nothing.
+     */
     private val lock = ReentrantLock()
+
+    /** Every log line from a call is tagged with its account's index. */
+    private fun log(message: String) = log(account.config.index, message)
+
+    private val pendingSipCalls = mutableListOf<() -> Unit>()
+
+    /** Queues a pjsua2 call for the next tick to run. Caller must hold [lock]. */
+    private fun deferSipCall(action: () -> Unit) {
+        pendingSipCalls.add(action)
+    }
+
+    /** Runs what [deferSipCall] queued. Called from the tick only, and never under [lock]. */
+    private fun flushSipCalls() {
+        while (true) {
+            val next = lock.withLock { pendingSipCalls.removeFirstOrNull() } ?: return
+            try {
+                next()
+            } catch (e: Exception) {
+                log("Error: SIP operation failed: ${e.message}")
+            }
+        }
+    }
 
     val direction: CallDirection = if (uriToCall != null) CallDirection.OUTGOING else CallDirection.INCOMING
 
@@ -109,6 +151,21 @@ class Call(
     private var lastSeenMillis = System.currentTimeMillis()
     private var callSettledAtMillis: Long? = null
     private var answerAtMillis: Long? = null
+    private var ringTimeoutFired = false
+
+    /** Set once this call is gone; its pjsua2 peer is destroyed later by [CallDisposal]. */
+    private var disposed = false
+
+    /** A finished TTS fetch waiting for the tick to start playing it. */
+    private var fetchedAudio: TtsResult? = null
+
+    /**
+     * Bumped whenever a pending TTS fetch stops being wanted -- a new prompt, an
+     * interruption, a disconnect. A fetch that lands under a stale generation is thrown
+     * away instead of played, which is how a prompt interrupted mid-synthesis stays
+     * interrupted.
+     */
+    private var ttsGeneration = 0L
     private var callInfo: CallInfo? = null
     private val pressedDigitList = mutableListOf<String>()
     private var currentPlayback: CurrentPlayback? = null
@@ -125,77 +182,108 @@ class Call(
         prettyPrintMenu(menu)
         val (id, otherIds) = getCallbackIds()
         callbackId = id
-        log(account.config.index, "Registering call with id $callbackId")
+        log("Registering call with id $callbackId")
         commandHandler.registerCall(callbackId, this, otherIds)
     }
 
-    /** Periodic housekeeping tick -- called for every live call from the main loop. */
-    fun handleEvents(): Unit =
-        lock.withLock {
-            val now = System.currentTimeMillis()
-            if (!connected && now - lastSeenMillis > (ringTimeout * 1000).toLong()) {
-                triggerWebhookEvent(WebhookEvent.RingTimeout)
-                log(account.config.index, "Ring timeout of $ringTimeout triggered")
-                hangupCall()
-                return
-            }
-            val answerAt = answerAtMillis
-            if (!connected && answerAt != null && answerAt < now) {
-                log(account.config.index, "Call will be answered now.")
-                answerAtMillis = null
-                val callParam = CallOpParam()
-                callParam.statusCode = 200
-                answer(callParam)
-                return
-            }
-            val settledAt = callSettledAtMillis
-            if (!connected && settledAt != null && settledAt < now) {
-                callSettledAtMillis = null
-                handleConnectedState()
-                return
-            }
-            if (!connected) return
-            val timeoutSeconds = menu?.timeout ?: Constants.DEFAULT_RING_TIMEOUT
-            if (now - lastSeenMillis > (timeoutSeconds * 1000).toLong()) {
-                log(account.config.index, "Timeout of $timeoutSeconds triggered")
-                menu?.let {
-                    handleMenu(it.timeoutChoice)
-                    triggerWebhookEvent(WebhookEvent.Timeout(it.id))
-                }
-                return
-            }
-            if (playbackIsDone && scheduledPostAction != null) {
-                val postAction = scheduledPostAction!!
-                scheduledPostAction = null
-                handlePostAction(postAction)
-                return
-            }
-            if (pressedDigitList.isNotEmpty()) {
-                val nextDigit = pressedDigitList.removeAt(0)
-                handleDtmfDigit(nextDigit)
-                return
-            }
+    /**
+     * Periodic housekeeping tick -- called for every live call from the main loop.
+     *
+     * At most one state transition per tick, and the priority order is load-bearing:
+     * [onDtmfDigit] calls `stopPlayback()` (setting `playbackIsDone`) *before* enqueuing
+     * the digit, so pressing a key during a prompt that has a `post_action` runs the post
+     * action first, and the digit is then matched against the menu that results.
+     */
+    fun handleEvents() {
+        try {
+            lock.withLock { tick() }
+        } finally {
+            // Outside the lock, and in a `finally` because `tick` returns early all over
+            // the place -- this is the only thing that ever runs the deferred SIP calls.
+            flushSipCalls()
         }
+    }
+
+    private fun tick() {
+        // The tick iterates a snapshot of the registry, which can still contain a call
+        // that disconnected (and released its pjsua2 peer) in the meantime.
+        if (disposed) return
+        val now = System.currentTimeMillis()
+        if (!connected && !ringTimeoutFired && now - lastSeenMillis > (ringTimeout * 1000).toLong()) {
+            // Latched: this branch mutates nothing the condition reads, and DISCONNECTED
+            // takes a while to come back, so without it the tick re-fires the webhook
+            // every 10 ms in the meantime.
+            ringTimeoutFired = true
+            triggerWebhookEvent(WebhookEvent.RingTimeout)
+            log("Ring timeout of $ringTimeout triggered")
+            hangupCall()
+            return
+        }
+        val answerAt = answerAtMillis
+        if (!connected && answerAt != null && answerAt < now) {
+            log("Call will be answered now.")
+            answerAtMillis = null
+            val callParam = CallOpParam()
+            callParam.statusCode = 200
+            deferSipCall { answer(callParam) }
+            return
+        }
+        val settledAt = callSettledAtMillis
+        if (!connected && settledAt != null && settledAt < now) {
+            callSettledAtMillis = null
+            handleConnectedState()
+            return
+        }
+        if (!connected) return
+        val timeoutSeconds = menu?.timeout ?: Constants.DEFAULT_RING_TIMEOUT
+        if (now - lastSeenMillis > (timeoutSeconds * 1000).toLong()) {
+            log("Timeout of $timeoutSeconds triggered")
+            menu?.let {
+                handleMenu(it.timeoutChoice)
+                triggerWebhookEvent(WebhookEvent.Timeout(it.id))
+            }
+            return
+        }
+        val fetched = fetchedAudio
+        if (fetched != null) {
+            fetchedAudio = null
+            // Started here rather than on the TTS thread: creating the player is a
+            // pjsua2 call, and the tick runs on a thread pjsip knows about.
+            playWavFile(fetched.fileName, fetched.mustBeDeleted, waitForAudioToFinish)
+            return
+        }
+        val postAction = scheduledPostAction
+        if (playbackIsDone && postAction != null) {
+            scheduledPostAction = null
+            handlePostAction(postAction)
+            return
+        }
+        if (pressedDigitList.isNotEmpty()) {
+            val nextDigit = pressedDigitList.removeAt(0)
+            handleDtmfDigit(nextDigit)
+            return
+        }
+    }
 
     private fun handlePostAction(postAction: PostAction) {
-        log(account.config.index, "Scheduled post action: ${postAction.action}")
+        log("Scheduled post action: ${postAction.action}")
         when (postAction) {
             is PostAction.Noop -> {}
             is PostAction.Return -> {
-                var m = menu
-                if (m == null) {
-                    log(account.config.index, "No menu to return to")
+                val current = menu
+                if (current == null) {
+                    log("No menu to return to")
                     return
                 }
-                repeat(postAction.level) { m = m?.parentMenu }
-                if (m != null) handleMenu(m) else log(account.config.index, "Could not return ${postAction.level} level in current menu")
+                val target = generateSequence(current) { it.parentMenu }.elementAtOrNull(postAction.level)
+                if (target != null) handleMenu(target) else log("Could not return ${postAction.level} level in current menu")
             }
             is PostAction.Jump -> {
                 val newMenu = menuMap[postAction.menuId]
                 if (newMenu != null) {
                     handleMenu(newMenu)
                 } else {
-                    log(account.config.index, "Could not find menu_id: \"${postAction.menuId}\". Valid IDs are ${menuMap.keys}")
+                    log("Could not find menu_id: \"${postAction.menuId}\". Valid IDs are ${menuMap.keys}")
                 }
             }
             is PostAction.Hangup -> hangupCall()
@@ -208,46 +296,58 @@ class Call(
     }
 
     private fun handleConnectedState() {
-        log(account.config.index, "Call is established.")
+        log("Call is established.")
         connected = true
         resetTimeout()
         triggerWebhookEvent(WebhookEvent.CallEstablished)
         handleMenu(menu)
     }
 
-    override fun onCallState(prm: OnCallStateParam): Unit =
+    override fun onCallState(prm: OnCallStateParam) {
+        var disconnected = false
         lock.withLock {
             if (callInfo == null) callInfo = getCallInfo()
             val ci = info
             when (ci.state) {
-                pjsip_inv_state.PJSIP_INV_STATE_EARLY -> log(account.config.index, "Early")
-                pjsip_inv_state.PJSIP_INV_STATE_CALLING -> log(account.config.index, "Calling")
-                pjsip_inv_state.PJSIP_INV_STATE_CONNECTING -> log(account.config.index, "Call connecting...")
+                pjsip_inv_state.PJSIP_INV_STATE_EARLY -> log("Early")
+                pjsip_inv_state.PJSIP_INV_STATE_CALLING -> log("Calling")
+                pjsip_inv_state.PJSIP_INV_STATE_CONNECTING -> log("Call connecting...")
                 pjsip_inv_state.PJSIP_INV_STATE_CONFIRMED -> {
-                    log(account.config.index, "Call connected")
+                    log("Call connected")
                     extractHeadersFromResponse(prm)
                     callSettledAtMillis = System.currentTimeMillis() + (account.config.settleTime * 1000).toLong()
                 }
                 pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED -> {
-                    log(account.config.index, "Call disconnected (${ci.lastStatusCode} ${ci.lastReason})")
+                    log("Call disconnected (${ci.lastStatusCode} ${ci.lastReason})")
                     stopRecording()
                     triggerWebhookEvent(WebhookEvent.CallDisconnected)
+                    discardPendingTts()
                     connected = false
                     callSettledAtMillis = null
                     currentInput = ""
                     player = null
                     audioMedia = null
                     toneGen = null
+                    // Anything still queued is an answer/hangup for a call that no longer
+                    // exists. Dropping it here is what guarantees no deferred operation can
+                    // reach a pjsua2 peer that [CallDisposal] has already destroyed.
+                    pendingSipCalls.clear()
                     commandHandler.forgetCall(callbackId)
+                    disposed = true
+                    disconnected = true
                 }
-                else -> log(account.config.index, "Unknown state: ${ci.state}")
+                else -> log("Unknown state: ${ci.state}")
             }
         }
+        // The destruction itself has to wait until pjsua has released the call's id slot
+        // -- see [CallDisposal], which is emphatically not a detail worth inlining here.
+        if (disconnected) CallDisposal.enqueue(this)
+    }
 
     override fun onCallMediaState(prm: OnCallMediaStateParam): Unit =
         lock.withLock {
             val ci = info
-            log(account.config.index, "onCallMediaState call info state ${ci.state}")
+            log("onCallMediaState call info state ${ci.state}")
             ci.media.forEachIndexed { mediaIndex, media ->
                 if (media.type == pjmedia_type.PJMEDIA_TYPE_AUDIO &&
                     (
@@ -255,7 +355,7 @@ class Call(
                             media.status == pjsua_call_media_status.PJSUA_CALL_MEDIA_REMOTE_HOLD
                     )
                 ) {
-                    log(account.config.index, "Connected media ${media.status}")
+                    log("Connected media ${media.status}")
                     audioMedia = getAudioMedia(mediaIndex)
                     val requested = requestedRecordingFilename
                     if (requested != null && recorder == null) {
@@ -273,15 +373,17 @@ class Call(
             }
             stopPlayback()
             resetTimeout()
+            // Queued rather than handled here: `handleDtmfDigit` can enter a menu, and
+            // entering a menu can block on TTS. The tick picks it up on its own thread.
             pressedDigitList.add(prm.digit)
         }
 
     private fun handleDtmfDigit(pressedDigit: String) {
-        log(account.config.index, "onDtmfDigit: digit $pressedDigit")
+        log("onDtmfDigit: digit $pressedDigit")
         triggerWebhookEvent(WebhookEvent.DtmfDigit(pressedDigit))
         val currentMenu = menu ?: return
         currentInput += pressedDigit
-        log(account.config.index, "Current input: $currentInput")
+        log("Current input: $currentInput")
         val choices = currentMenu.choices
         if (currentInput in choices) {
             handleMenu(choices.getValue(currentInput))
@@ -290,85 +392,79 @@ class Call(
         if (currentMenu.choicesArePin) {
             val maxChoiceLength = choices.keys.maxOfOrNull { it.length } ?: 0
             if (currentInput.length == maxChoiceLength) {
-                log(account.config.index, "No PIN matched $currentInput")
+                log("No PIN matched $currentInput")
                 handleMenu(currentMenu.defaultChoice)
             }
         } else {
             val stillValid = choices.keys.any { it.startsWith(currentInput) }
             if (!stillValid) {
-                log(account.config.index, "Invalid input $currentInput")
+                log("Invalid input $currentInput")
                 handleMenu(currentMenu.defaultChoice)
             }
         }
     }
 
     override fun onCallTransferRequest(prm: OnCallTransferRequestParam) {
-        log(account.config.index, "onCallTransferRequest")
+        log("onCallTransferRequest")
     }
 
     override fun onCallTransferStatus(prm: OnCallTransferStatusParam) {
-        log(account.config.index, "onCallTransferStatus. Status code: ${prm.statusCode} (${prm.reason})")
+        log("onCallTransferStatus. Status code: ${prm.statusCode} (${prm.reason})")
     }
 
     override fun onCallReplaceRequest(prm: OnCallReplaceRequestParam) {
-        log(account.config.index, "onCallReplaceRequest")
+        log("onCallReplaceRequest")
     }
 
     override fun onCallReplaced(prm: OnCallReplacedParam) {
-        log(account.config.index, "onCallReplaced")
+        log("onCallReplaced")
     }
 
     override fun onCallRxOffer(prm: OnCallRxOfferParam) {
-        log(account.config.index, "onCallRxOffer")
+        log("onCallRxOffer")
     }
 
     override fun onCallRxReinvite(prm: OnCallRxReinviteParam) {
-        log(account.config.index, "onCallRxReinvite")
+        log("onCallRxReinvite")
     }
 
     override fun onCallTxOffer(prm: OnCallTxOfferParam) {
-        log(account.config.index, "onCallTxOffer")
+        log("onCallTxOffer")
     }
 
     private fun handleMenu(
-        menu: Menu?,
+        newMenu: Menu?,
         sendWebhookEvent: Boolean = true,
         handleAction: Boolean = true,
         resetInput: Boolean = true,
     ) {
         resetTimeout()
-        if (menu == null) {
-            log(account.config.index, "No menu supplied")
+        if (newMenu == null) {
+            log("No menu supplied")
             return
         }
-        this.menu = menu
-        val menuId = menu.id
+        menu = newMenu
+        val menuId = newMenu.id
         if (menuId != null && sendWebhookEvent) {
             triggerWebhookEvent(WebhookEvent.EnteredMenu(menuId))
         }
         if (resetInput) currentInput = ""
-        var message = menu.message
-        val handleAsTemplate = menu.handleAsTemplate
-        val audioFile = menu.audioFile
-        val language = menu.language
-        val action = menu.action
-        val postAction = menu.postAction
-        val shouldCache = menu.cacheAudio
-        val waitForAudioToFinish = menu.waitForAudioToFinish
+        var message = newMenu.message
         if (!message.isNullOrEmpty()) {
-            if (handleAsTemplate) message = haClient.renderTemplate(message)
-            playMessage(message, language, shouldCache, waitForAudioToFinish)
+            if (newMenu.handleAsTemplate) message = haClient.renderTemplate(message)
+            playMessage(message, newMenu.language, newMenu.cacheAudio, newMenu.waitForAudioToFinish)
         }
+        val audioFile = newMenu.audioFile
         if (!audioFile.isNullOrEmpty()) {
-            playAudioFile(audioFile, shouldCache, waitForAudioToFinish)
+            playAudioFile(audioFile, newMenu.cacheAudio, newMenu.waitForAudioToFinish)
         }
-        if (handleAction) handleAction(action)
-        scheduledPostAction = postAction
+        if (handleAction) handleAction(newMenu.action)
+        scheduledPostAction = newMenu.postAction
     }
 
     private fun handleAction(action: JsonObject?) {
         if (action == null) {
-            log(account.config.index, "No action supplied")
+            log("No action supplied")
             return
         }
         commandHandler.handleCommand(action, this)
@@ -381,18 +477,53 @@ class Call(
         waitForAudioToFinish: Boolean,
     ): Unit =
         lock.withLock {
-            log(account.config.index, "Playing message: $message")
+            log("Playing message: $message")
+            discardPendingTts()
             val cachedFile = AudioCache.getCachedFile(cacheAudio, haConfig.cacheDir, CacheType.MESSAGE, message)
             if (cachedFile != null) {
-                setCurrentPlayback(CurrentPlayback.Message(message))
+                currentPlayback = CurrentPlayback.Message(message)
                 playWavFile(cachedFile, false, waitForAudioToFinish)
                 return
             }
-            val ttsResult = haClient.createAndGetTts(message, language)
-            setCurrentPlayback(CurrentPlayback.Message(message))
-            AudioCache.cacheFile(cacheAudio && ttsResult.wasSuccessful, haConfig.cacheDir, CacheType.MESSAGE, message, ttsResult.fileName)
-            playWavFile(ttsResult.fileName, ttsResult.mustBeDeleted, waitForAudioToFinish)
+            // Not cached, so this needs a synthesis round-trip to HA -- seconds, on the
+            // thread that ticks every other call. Fetch it off-thread and claim playback
+            // now: `playbackIsDone = false` is what keeps the scheduled post action and
+            // `wait_for_audio_to_finish` honest while the audio is still being made.
+            currentPlayback = CurrentPlayback.Message(message)
+            playbackIsDone = false
+            this.waitForAudioToFinish = waitForAudioToFinish
+            val generation = ttsGeneration
+            haClient.createAndGetTtsAsync(message, language) { result ->
+                AudioCache.cacheFile(cacheAudio && result.wasSuccessful, haConfig.cacheDir, CacheType.MESSAGE, message, result.fileName)
+                onTtsFetched(generation, result)
+            }
         }
+
+    /**
+     * Hands a finished fetch to the tick, or throws it away if the prompt it belongs to
+     * is no longer current.
+     *
+     * Runs on a TTS thread, which pjsip knows nothing about, so storing a field is all
+     * that may happen here -- the tick is what starts the player.
+     */
+    private fun onTtsFetched(
+        generation: Long,
+        result: TtsResult,
+    ) = lock.withLock {
+        if (generation != ttsGeneration) {
+            log("Discarding TTS audio for a prompt that is no longer current.")
+            if (result.mustBeDeleted) File(result.fileName).delete()
+            return
+        }
+        fetchedAudio = result
+    }
+
+    /** Caller holds [lock]. Invalidates a fetch in flight and drops one that already landed. */
+    private fun discardPendingTts() {
+        ttsGeneration++
+        fetchedAudio?.let { if (it.mustBeDeleted) File(it.fileName).delete() }
+        fetchedAudio = null
+    }
 
     override fun playAudioFile(
         audioFile: String,
@@ -400,25 +531,28 @@ class Call(
         waitForAudioToFinish: Boolean,
     ): Unit =
         lock.withLock {
-            log(account.config.index, "Playing audio file: $audioFile")
+            log("Playing audio file: $audioFile")
+            // Supersedes a prompt still being synthesized, the way it would supersede one
+            // already playing: a menu with both `message` and `audio_file` plays the file.
+            discardPendingTts()
             val cachedFile = AudioCache.getCachedFile(cacheAudio, haConfig.cacheDir, CacheType.AUDIO_FILE, audioFile)
             if (cachedFile != null) {
-                setCurrentPlayback(CurrentPlayback.AudioFile(audioFile))
+                currentPlayback = CurrentPlayback.AudioFile(audioFile)
                 playWavFile(cachedFile, false, waitForAudioToFinish)
                 return
             }
             val fileFormat = audioFormatFromFilename(audioFile)
             if (fileFormat == null) {
-                log(null, "Error getting audio format from filename: $audioFile")
+                log("Error getting audio format from filename: $audioFile")
                 return
             }
             val audioFileContent = File(audioFile).readBytes()
             val soundFileName = convertAudioStreamToWavFile(audioFileContent, fileFormat)
             if (soundFileName == null) {
-                log(null, "Could not convert to wav: $audioFile")
+                log("Could not convert to wav: $audioFile")
                 return
             }
-            setCurrentPlayback(CurrentPlayback.AudioFile(audioFile))
+            currentPlayback = CurrentPlayback.AudioFile(audioFile)
             AudioCache.cacheFile(cacheAudio, haConfig.cacheDir, CacheType.AUDIO_FILE, audioFile, soundFileName)
             playWavFile(soundFileName, true, waitForAudioToFinish)
         }
@@ -436,14 +570,17 @@ class Call(
             player = newPlayer
             newPlayer.playFile(media, soundFileName)
         } else {
-            log(account.config.index, "Audio media not connected. Cannot play audio stream!")
+            log("Audio media not connected. Cannot play audio stream!")
+            // Playback was claimed when the fetch was requested; release it, or the
+            // scheduled post action would wait for a player that never starts.
+            playbackIsDone = true
         }
         if (mustBeDeleted) File(soundFileName).delete()
     }
 
     private fun onPlaybackDone(): Unit =
         lock.withLock {
-            log(account.config.index, "Playback done.")
+            log("Playback done.")
             currentPlayback?.let { triggerWebhookEvent(it.toPlaybackDoneEvent()) }
             currentPlayback = null
             playbackIsDone = true
@@ -453,7 +590,8 @@ class Call(
     override fun stopPlayback(): Unit =
         lock.withLock {
             if (!playbackIsDone) {
-                log(account.config.index, "Playback interrupted.")
+                log("Playback interrupted.")
+                discardPendingTts()
                 player?.let { p -> audioMedia?.let { p.stopTransmit(it) } }
                 player = null
                 playbackIsDone = true
@@ -464,7 +602,7 @@ class Call(
         lock.withLock {
             val existingRecorder = recorder
             if (existingRecorder != null) {
-                log(account.config.index, "Recording already running -> reattaching")
+                log("Recording already running -> reattaching")
                 audioMedia?.let { media ->
                     try {
                         media.stopTransmit(existingRecorder)
@@ -473,21 +611,21 @@ class Call(
                     try {
                         media.startTransmit(existingRecorder)
                     } catch (e: Exception) {
-                        log(account.config.index, "Error: Could not reattach recorder: ${e.message}")
+                        log("Error: Could not reattach recorder: ${e.message}")
                     }
                 }
                 return
             }
             val media = audioMedia
             if (media == null) {
-                log(account.config.index, "Audio media not connected yet. Recording will start once media is available")
+                log("Audio media not connected yet. Recording will start once media is available")
                 requestedRecordingFilename = recordingFile
                 return
             }
             requestedRecordingFilename = null
             val targetDir = File(recordingFile).parentFile
             if (targetDir == null || !targetDir.isDirectory) {
-                log(account.config.index, "Error: Call recordings directory not found: $targetDir")
+                log("Error: Call recordings directory not found: $targetDir")
                 return
             }
             val newRecorder = AudioMediaRecorder()
@@ -495,14 +633,14 @@ class Call(
                 newRecorder.createRecorder(recordingFile)
                 media.startTransmit(newRecorder)
             } catch (e: Exception) {
-                log(account.config.index, "Error: Failed to start call recording: ${e.message}")
+                log("Error: Failed to start call recording: ${e.message}")
                 recorder = newRecorder
                 stopRecording()
                 return
             }
             recorder = newRecorder
             this.recordingFile = recordingFile
-            log(account.config.index, "Call recording started: $recordingFile")
+            log("Call recording started: $recordingFile")
             triggerWebhookEvent(WebhookEvent.RecordingStarted(recordingFile))
         }
 
@@ -513,10 +651,10 @@ class Call(
             try {
                 audioMedia?.stopTransmit(existingRecorder)
             } catch (e: Exception) {
-                log(account.config.index, "Error: Failed to stop call recording: ${e.message}")
+                log("Error: Failed to stop call recording: ${e.message}")
             }
             recordingFile?.let { file ->
-                log(account.config.index, "Call recording stopped: $file")
+                log("Call recording stopped: $file")
                 triggerWebhookEvent(WebhookEvent.RecordingStopped(file))
             }
             recorder = null
@@ -524,36 +662,36 @@ class Call(
         }
 
     fun accept(
-        answerMode: io.github.arnonym.config.AnswerMode,
+        answerMode: AnswerMode,
         answerAfter: Double,
     ): Unit =
         lock.withLock {
-            if (answerMode == io.github.arnonym.config.AnswerMode.REJECT) {
+            if (answerMode == AnswerMode.REJECT) {
                 val sipCode = account.config.options.rejectSipCode
-                log(account.config.index, "Rejecting call with SIP code $sipCode.")
+                log("Rejecting call with SIP code $sipCode.")
                 val callParam = CallOpParam()
                 callParam.statusCode = sipCode
                 callParam.reason = REASON_PHRASES[sipCode] ?: ""
-                answer(callParam)
+                deferSipCall { answer(callParam) }
                 return
             }
             val callParam = CallOpParam()
             callParam.statusCode = 180
-            answer(callParam)
-            if (answerMode == io.github.arnonym.config.AnswerMode.ACCEPT) {
+            deferSipCall { answer(callParam) }
+            if (answerMode == AnswerMode.ACCEPT) {
                 answerAtMillis = System.currentTimeMillis() + (answerAfter * 1000).toLong()
             }
         }
 
     override fun hangupCall(sipCode: Int): Unit =
         lock.withLock {
-            log(account.config.index, "Hang-up.")
+            log("Hang-up.")
             val callParam = CallOpParam(true)
             if (sipCode != 0 && !connected) {
                 callParam.statusCode = sipCode
                 callParam.reason = REASON_PHRASES[sipCode] ?: ""
             }
-            hangup(callParam)
+            deferSipCall { hangup(callParam) }
         }
 
     override fun answerCall(
@@ -561,7 +699,7 @@ class Call(
         overwriteWebhooks: WebhookToCall?,
     ): Unit =
         lock.withLock {
-            log(account.config.index, "Trigger answer of call (if not established already)")
+            log("Trigger answer of call (if not established already)")
             if (newMenu != null) {
                 val (normalized, map) = normalizeMenu(newMenu, haConfig.ttsConfig.language, account.config.index)
                 menu = normalized
@@ -578,33 +716,33 @@ class Call(
 
     override fun transfer(transferTo: String): Unit =
         lock.withLock {
-            log(account.config.index, "Transfer call to $transferTo")
+            log("Transfer call to $transferTo")
             val xferParam = CallOpParam(true)
-            xfer(transferTo, xferParam)
+            deferSipCall { xfer(transferTo, xferParam) }
         }
 
     override fun bridgeAudio(other: CallHandle) {
         require(other is Call) { "bridgeAudio requires another Call instance" }
         val (firstLock, secondLock) = if (callbackId <= other.callbackId) lock to other.lock else other.lock to lock
         if (!firstLock.tryLock(BRIDGE_LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-            log(account.config.index, "Could not acquire lock for bridge_audio within timeout; aborting.")
+            log("Could not acquire lock for bridge_audio within timeout; aborting.")
             return
         }
         try {
             if (!secondLock.tryLock(BRIDGE_LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                log(account.config.index, "Could not acquire partner call's lock for bridge_audio within timeout; aborting.")
+                log("Could not acquire partner call's lock for bridge_audio within timeout; aborting.")
                 return
             }
             try {
                 val myMedia = audioMedia
                 val otherMedia = other.audioMedia
                 if (myMedia != null && otherMedia != null) {
-                    log(account.config.index, "Connect audio stream of \"$callbackId\" and \"${other.callbackId}\"")
+                    log("Connect audio stream of \"$callbackId\" and \"${other.callbackId}\"")
                     myMedia.startTransmit(otherMedia)
                     otherMedia.startTransmit(myMedia)
-                    log(account.config.index, "Audio streams connected.")
+                    log("Audio streams connected.")
                 } else {
-                    log(account.config.index, "At least one audio media is not connected. Cannot bridge audio between calls!")
+                    log("At least one audio media is not connected. Cannot bridge audio between calls!")
                 }
             } finally {
                 secondLock.unlock()
@@ -620,12 +758,12 @@ class Call(
     ): Unit =
         lock.withLock {
             resetTimeout()
-            log(account.config.index, "Sending DTMF $digits")
+            log("Sending DTMF $digits")
             when (method) {
                 DtmfMethod.IN_BAND -> {
                     val media = audioMedia
                     if (media == null) {
-                        log(account.config.index, "Audio media not connected. Cannot send DTMF in-band!")
+                        log("Audio media not connected. Cannot send DTMF in-band!")
                         return
                     }
                     var generator = toneGen
@@ -642,14 +780,14 @@ class Call(
                     dtmfParam.method = pjsua_dtmf_method.PJSUA_DTMF_METHOD_RFC2833
                     dtmfParam.duration = Constants.DEFAULT_DTMF_ON
                     dtmfParam.digits = digits
-                    sendDtmf(dtmfParam)
+                    deferSipCall { sendDtmf(dtmfParam) }
                 }
                 DtmfMethod.SIP_INFO -> {
                     val dtmfParam = CallSendDtmfParam()
                     dtmfParam.method = pjsua_dtmf_method.PJSUA_DTMF_METHOD_SIP_INFO
                     dtmfParam.duration = Constants.DEFAULT_DTMF_ON
                     dtmfParam.digits = digits
-                    sendDtmf(dtmfParam)
+                    deferSipCall { sendDtmf(dtmfParam) }
                 }
             }
         }
@@ -685,7 +823,6 @@ class Call(
             )
         }
 
-    /** Direct port of call.py's `extract_headers_from_response`. */
     private fun extractHeadersFromResponse(prm: OnCallStateParam) {
         val extractHeaders = account.config.options.extractHeaders
         val debugHeaders = account.config.globalOptions.debugHeaders
@@ -706,10 +843,6 @@ class Call(
 
     private fun resetTimeout() {
         lastSeenMillis = System.currentTimeMillis()
-    }
-
-    private fun setCurrentPlayback(playback: CurrentPlayback) {
-        currentPlayback = playback
     }
 
     companion object {

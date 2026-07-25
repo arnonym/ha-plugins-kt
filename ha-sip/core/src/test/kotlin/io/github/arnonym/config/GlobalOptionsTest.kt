@@ -50,6 +50,37 @@ class GlobalOptionsTest {
     }
 
     @Test
+    fun `parse tls port default`() {
+        GlobalOptions.parse("").tlsPort shouldBe 5061
+    }
+
+    @Test
+    fun `parse rtp port defaults to pjsip's own base port`() {
+        // Restates DEFAULT_RTP_PORT from pjsua_core.c, which `pjsua_acc_config_default`
+        // has already written into the account's rtp_cfg. Setting it explicitly is a
+        // no-op, which is what lets the option be non-null.
+        GlobalOptions.parse("").rtpPort shouldBe 4000
+    }
+
+    @Test
+    fun `parse rtp port`() {
+        GlobalOptions.parse("--rtp-port 14000").rtpPort shouldBe 14000
+    }
+
+    @Test
+    fun `parse rtp port with equals`() {
+        GlobalOptions.parse("--rtp-port=24000").rtpPort shouldBe 24000
+    }
+
+    @Test
+    fun `parse rtp port alongside other options`() {
+        val options = GlobalOptions.parse("--udp=disabled --rtp-port 30000 --tls-port 5062")
+        options.rtpPort shouldBe 30000
+        options.tlsPort shouldBe 5062
+        options.enableUdp shouldBe false
+    }
+
+    @Test
     fun `parse debug headers default`() {
         GlobalOptions.parse("").debugHeaders shouldBe false
     }

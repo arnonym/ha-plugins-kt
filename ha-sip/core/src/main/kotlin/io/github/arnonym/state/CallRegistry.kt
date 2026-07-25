@@ -48,13 +48,6 @@ class CallRegistry<C : Any> {
         return currentCalls[callbackId]
     }
 
-    fun getCallUnsafe(identifier: String): C {
-        val callbackId =
-            resolveCallbackId(identifier)
-                ?: throw NoSuchElementException("Call not found for identifier: $identifier")
-        return currentCalls[callbackId] ?: throw NoSuchElementException("Call not found for identifier: $identifier")
-    }
-
     /** Current live call objects -- used by the main loop to tick `handleEvents()` on each. */
     fun currentCalls(): Collection<C> = currentCalls.values.toList()
 }
