@@ -61,14 +61,23 @@ fun makeCall(
     haClient: HaClient,
     ringTimeout: Double,
     webhooks: WebhookToCall?,
-): Call {
+): Call? {
     val newCall =
         Call(
             account, PJSUA_INVALID_ID, uriToCall, menu, commandHandler, eventSender, haConfig, haClient,
             ringTimeout, webhooks, emptyMap(),
         )
     val callParam = CallOpParam(true)
-    newCall.makeCall(uriToCall, callParam)
+    try {
+        newCall.makeCall(uriToCall, callParam)
+    } catch (e: Exception) {
+        log(null, "Error making call to $uriToCall: ${e.message}")
+        commandHandler.forgetCall(newCall.callbackId)
+        // `isActive` is false at PJSUA_INVALID_ID, so this is destroyed on the next drain
+        // rather than left for the finalizer.
+        CallDisposal.enqueue(newCall)
+        return null
+    }
     newCall.triggerWebhookEvent(WebhookEvent.OutgoingCallInitiated)
     return newCall
 }
