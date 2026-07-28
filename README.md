@@ -901,28 +901,37 @@ There are two ways to get this build running against a real Home Assistant insta
 1. Add `https://github.com/arnonym/ha-plugins-kt` as a custom add-on repository (badge above), then install
    "ha-sip-kt" from the store.
 2. Home Assistant Supervisor reads `ha-sip/config.json`'s `image` field
-   (`agellhaus/{arch}-ha-sip-kt`) and **pulls that pre-built image from Docker Hub
-   instead of building from source** — this is standard Supervisor behavior for any
-   add-on that declares an `image`. That means the image must already have been built
-   and pushed by [`.github/workflows/build-amd64.yml`](.github/workflows/build-amd64.yml) /
+   (`ghcr.io/arnonym/{arch}-ha-sip-kt`) and **pulls that pre-built image from the GitHub
+   Container Registry instead of building from source** — this is standard Supervisor
+   behavior for any add-on that declares an `image`. That means the image must already
+   have been built and pushed by [`.github/workflows/build-amd64.yml`](.github/workflows/build-amd64.yml) /
    [`build-aarch64.yml`](.github/workflows/build-aarch64.yml) for the tag matching
    `config.json`'s `version` (currently `5.6`) before installing this way. Those
-   workflows need a `DOCKER_HUB_PASSWORD` repository secret (a Docker Hub access token
-   for the `agellhaus` account) configured in this repo's GitHub settings, and trigger
-   on push to `main` (adjust the `branches:` list in both workflow files if you use a
-   different default branch) or via manual `workflow_dispatch`.
-3. These test images are pushed to `agellhaus/{arch}-ha-sip-kt` — a **separate** Docker
-   Hub repository from the production `agellhaus/{arch}-ha-sip` used by the real Python
+   workflows authenticate to `ghcr.io` with the built-in `GITHUB_TOKEN` (via the job's
+   `packages: write` permission), so **no registry secret has to be configured**. They
+   push images on `main` (see [Beta channel](#beta-channel-the-next-repository) for the
+   `next` branch) or via manual `workflow_dispatch`. The image name is read from
+   `config.json`'s `image` field rather than hard-coded, which is what lets the beta
+   mirror reuse the same two workflow files.
+3. These test images live under `ghcr.io/arnonym/{arch}-ha-sip-kt` — completely separate
+   from the production `agellhaus/{arch}-ha-sip` Docker Hub images used by the Python
    add-on, so testing this port can never overwrite what existing users are running.
+
+> **Note:**
+> A GHCR package is **private** when it is first created, and Supervisor pulls
+> anonymously. After the very first successful push of a new image name, open the
+> package under https://github.com/users/arnonym/packages, then *Package settings →
+> Change visibility → Public* (once per package, i.e. per architecture and per channel).
+> Installing while the package is private fails with a manifest/authentication error.
 
 ### Option B — local add-on (Supervisor builds from source on your machine)
 
-If you'd rather Supervisor build the image itself from this checkout (no Docker Hub
-push required, and you always get exactly what's in your working tree):
+If you'd rather Supervisor build the image itself from this checkout (no registry push
+required, and you always get exactly what's in your working tree):
 
 1. Copy (or symlink) the `ha-sip/` directory into Home Assistant's `/addons/local/`
    folder (e.g. via the Samba or SSH/Terminal add-on) — as `/addons/local/ha-sip-kt`.
-2. Remove the `"image": "agellhaus/{arch}-ha-sip-kt",` line from the copy's
+2. Remove the `"image": "ghcr.io/arnonym/{arch}-ha-sip-kt",` line from the copy's
    `config.json`. As long as `image` is set, Supervisor always pulls from the registry
    instead of building — removing it is what makes Supervisor build locally from the
    `Dockerfile` in that folder instead.
@@ -933,6 +942,44 @@ push required, and you always get exactly what's in your working tree):
 
 Either way, once installed you configure it exactly like described above in
 [Installation](#installation) — same options schema as the Python add-on.
+
+## Beta channel (the `next` repository)
+
+Like the Python add-on's `ha-plugins-next`, this port has a second add-on repository for
+beta testing: [`https://github.com/arnonym/ha-plugins-kt-next`](https://github.com/arnonym/ha-plugins-kt-next).
+It carries the add-on slug `ha-sip-kt-next` and the images `ghcr.io/arnonym/{arch}-ha-sip-kt-next`,
+so testers can install it **alongside** the regular (non-beta) add-on — just don't run both
+against the same SIP account/port at once.
+
+**For testers:** add that repository URL in Home Assistant exactly like in
+[Installation](#installation) and install "ha-sip-kt-next".
+
+**For releasing a beta:** work happens on the `next` branch here; the beta repository is
+not edited by hand. Push `next`, then run:
+
+```bash
+mise run update-next-repo          # keep the version from ha-sip/config.json
+mise run update-next-repo 5.7-beta1  # or override it for this beta
+```
+
+The task clones the `next` branch into `~/tmp/ha-plugins-kt-next`, rewrites the add-on
+identity for the beta channel — `repository.json` (name, URL), `ha-sip/config.json` (name,
+slug, URL, description, `image`, optionally `version`) and the repo/slug/image names in
+`README.md` and `ha-sip/CHANGELOG.md` — commits, and **force-pushes** to the beta
+repository's `next` branch. Anything committed there directly is overwritten on the next
+run.
+
+Both build workflows are copied along and run in the beta repository too. They publish
+images from `main` here and from `next` in the mirror, taking the image name from
+`config.json`'s `image` — which is why no separate workflow file is needed for the beta.
+Because they push to `ghcr.io` with the built-in `GITHUB_TOKEN`, the beta repository needs
+no secrets of its own; its first build does need the two new `-ha-sip-kt-next` packages
+[switched to public](#option-a--install-via-the-add-on-store-uses-a-pre-built-image),
+though.
+
+The only other setup is push access over SSH (the task switches the remote to
+`git@github.com:...` before pushing). The defaults can be overridden with the `REPO_URL`,
+`NEXT_REPO_URL`, `NEXT_REPO_SSH` and `TMP_DIR` environment variables.
 
 ## Support
 

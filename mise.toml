@@ -69,3 +69,73 @@ run = '''
 set -euo pipefail
 exec uv run scripts/hasip_mqtt_cli.py "$@"
 '''
+
+[tasks.update-next-repo]
+description = "Publish the `next` branch to the beta add-on repository (ha-plugins-kt-next) for beta testing; optional arg overrides the add-on version"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mirrors the `next` branch of this repo into a *separate* Home Assistant add-on
+# repository, with the add-on identity rewritten to the `-next` beta channel so
+# testers can install it side by side with the regular one. The mirror is a
+# force-pushed copy -- never commit to ha-plugins-kt-next directly, it gets
+# overwritten on every run.
+REPO_URL="${REPO_URL:-https://github.com/arnonym/ha-plugins-kt}"
+NEXT_REPO_URL="${NEXT_REPO_URL:-https://github.com/arnonym/ha-plugins-kt-next}"
+NEXT_REPO_SSH="${NEXT_REPO_SSH:-git@github.com:arnonym/ha-plugins-kt-next.git}"
+TMP_DIR="${TMP_DIR:-$HOME/tmp/ha-plugins-kt-next}"
+export NEXT_REPO_URL
+
+for tool in git jq sed; do
+    command -v "$tool" >/dev/null || { echo "error: $tool not found on PATH" >&2; exit 1; }
+done
+
+echo "Cloning $REPO_URL (branch next) into $TMP_DIR..."
+rm -rf "$TMP_DIR"
+git clone -b next "$REPO_URL" "$TMP_DIR"
+
+REPO_JSON="$TMP_DIR/repository.json"
+CONFIG_JSON="$TMP_DIR/ha-sip/config.json"
+
+# jq can't edit in place, and `jq ... f > f` would truncate before reading.
+jq_edit() {
+    local file="$1" filter="$2" contents
+    contents="$(jq --indent 4 "$filter" "$file")"
+    printf '%s\n' "$contents" > "$file"
+}
+
+echo "Rewriting add-on identity for the beta channel..."
+jq_edit "$REPO_JSON" '.name = "Home Assistant addons by Arne Gellhaus (ha-sip Kotlin port, beta)"'
+jq_edit "$REPO_JSON" '.url = env.NEXT_REPO_URL'
+
+jq_edit "$CONFIG_JSON" '.name = "ha-sip-kt-next"'
+jq_edit "$CONFIG_JSON" '.slug = "ha-sip-kt-next"'
+jq_edit "$CONFIG_JSON" '.url = env.NEXT_REPO_URL'
+jq_edit "$CONFIG_JSON" '.description = "Home-Assistant SIP Gateway (Kotlin/JVM port, beta version)"'
+jq_edit "$CONFIG_JSON" '.image = "ghcr.io/arnonym/{arch}-ha-sip-kt-next"'
+
+# Docs: repo URLs, install badge, add-on slug and image references. The optional
+# `-next` in the patterns keeps this idempotent -- names that already carry the
+# suffix (the docs do talk about the beta channel) must not become `-next-next`.
+for doc in "$TMP_DIR/README.md" "$TMP_DIR/ha-sip/CHANGELOG.md"; do
+    sed -i \
+        -e 's/ha-plugins-kt\(-next\)\?/ha-plugins-kt-next/g' \
+        -e 's/ha-sip-kt\(-next\)\?/ha-sip-kt-next/g' \
+        "$doc"
+done
+
+if [ -z "${1:-}" ]; then
+    echo "Keeping version $(jq -r '.version' "$CONFIG_JSON")."
+else
+    echo "Setting version to $1"
+    export OVERWRITE_VERSION="$1"
+    jq_edit "$CONFIG_JSON" '.version = env.OVERWRITE_VERSION'
+fi
+
+cd "$TMP_DIR"
+git commit -a -m "Changes for beta repository."
+git remote set-url origin "$NEXT_REPO_SSH"
+git push --force
+echo "Pushed to $NEXT_REPO_URL (branch next)."
+'''
