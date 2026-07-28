@@ -120,6 +120,7 @@ jq_edit "$CONFIG_JSON" '.image = "ghcr.io/arnonym/{arch}-ha-sip-kt-next"'
 # suffix (the docs do talk about the beta channel) must not become `-next-next`.
 for doc in "$TMP_DIR/README.md" "$TMP_DIR/ha-sip/CHANGELOG.md"; do
     sed -i \
+        -e 's/9cd97bc4_ha-sip-kt/d3c2308f_ha-sip-kt-next/g' \
         -e 's/ha-plugins-kt\(-next\)\?/ha-plugins-kt-next/g' \
         -e 's/ha-sip-kt\(-next\)\?/ha-sip-kt-next/g' \
         "$doc"

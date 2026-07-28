@@ -1,6 +1,7 @@
 package io.github.arnonym.sip
 
 import io.github.arnonym.config.GlobalOptions
+import io.github.arnonym.config.planCodecPriorities
 import io.github.arnonym.log.log
 import org.pjsip.pjsua2.Endpoint
 import org.pjsip.pjsua2.EpConfig
@@ -43,6 +44,7 @@ fun createEndpoint(
     endpoint.libInit(epConfig)
     val codecs = endpoint.codecEnum2()
     log(null, "Supported audio codecs: ${codecs.joinToString(", ") { it.codecId }}")
+    endpoint.applyCodecPriorities(codecs.map { it.codecId }, config.globalOptions.codecs)
     endpoint.audDevManager().setNullDev()
 
     if (config.globalOptions.enableUdp) {
@@ -65,6 +67,30 @@ fun createEndpoint(
     }
     endpoint.libStart()
     return endpoint
+}
+
+private fun Endpoint.applyCodecPriorities(
+    available: List<String>,
+    requested: List<String>,
+) {
+    if (requested.isEmpty()) return
+    val plan = planCodecPriorities(available, requested)
+    if (plan.unmatched.isNotEmpty()) {
+        log(null, "Warning: no such codec: ${plan.unmatched.joinToString(", ")}")
+    }
+    if (plan.priorities.isEmpty()) {
+        log(null, "Error: --codecs matched nothing at all: keeping pjsip's default codec set")
+        return
+    }
+    plan.priorities.forEach { (codecId, priority) ->
+        try {
+            codecSetPriority(codecId, priority)
+        } catch (e: Exception) {
+            log(null, "Warning: could not set priority of codec $codecId: ${e.message}")
+        }
+    }
+    val enabled = plan.priorities.filter { it.priority > 0 }.map { it.codecId }
+    log(null, "Offering audio codecs: ${enabled.joinToString(", ")}")
 }
 
 /**

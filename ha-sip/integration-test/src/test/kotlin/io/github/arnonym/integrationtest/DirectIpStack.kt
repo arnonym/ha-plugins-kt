@@ -153,10 +153,18 @@ object DirectIpStack {
     /**
      * An extra instance the caller owns and disposes of, for scenarios about the process
      * itself rather than about a call. Not registered with the collector or with [reset].
+     *
+     * [envOverrides] wins over the standard environment, for the scenarios that are about
+     * a startup-time setting -- `GLOBAL_OPTIONS` and `LOG_LEVEL` are only read in `main()`,
+     * so there is no way to reach them on an instance that is already up.
      */
-    fun spawnDisposable(name: String): HaSipInstance {
+    fun spawnDisposable(
+        name: String,
+        envOverrides: Map<String, String> = emptyMap(),
+    ): HaSipInstance {
         val port = HaSipInstance.freePort()
-        return HaSipInstance(name, port, sipEnv(name, port, answerMode = "LISTEN")).also { it.awaitReady() }
+        return HaSipInstance(name, port, sipEnv(name, port, answerMode = "LISTEN") + envOverrides)
+            .also { it.awaitReady() }
     }
 
     private fun sipEnv(

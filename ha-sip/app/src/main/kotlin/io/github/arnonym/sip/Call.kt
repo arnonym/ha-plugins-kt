@@ -50,7 +50,6 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import org.pjsip.pjsua2.Call as PjCall
 
-/** Direct port of call.py's top-level `make_call`. */
 fun makeCall(
     account: Account,
     uriToCall: String,
@@ -68,6 +67,7 @@ fun makeCall(
             ringTimeout, webhooks, emptyMap(),
         )
     val callParam = CallOpParam(true)
+    if (!account.config.globalOptions.textMedia) callParam.opt.textCount = 0
     try {
         newCall.makeCall(uriToCall, callParam)
     } catch (e: Exception) {
@@ -232,7 +232,8 @@ class Call(
         if (!connected && answerAt != null && answerAt < now) {
             log("Call will be answered now.")
             answerAtMillis = null
-            val callParam = CallOpParam()
+            // The only answer that carries an SDP, so the only one text media can bloat.
+            val callParam = answerCallParam()
             callParam.statusCode = 200
             deferSipCall { answer(callParam) }
             return
@@ -690,6 +691,13 @@ class Call(
             if (answerMode == AnswerMode.ACCEPT) {
                 answerAtMillis = System.currentTimeMillis() + (answerAfter * 1000).toLong()
             }
+        }
+
+    private fun answerCallParam(): CallOpParam =
+        if (account.config.globalOptions.textMedia) {
+            CallOpParam()
+        } else {
+            CallOpParam(true).also { it.opt.textCount = 0 }
         }
 
     override fun hangupCall(sipCode: Int): Unit =

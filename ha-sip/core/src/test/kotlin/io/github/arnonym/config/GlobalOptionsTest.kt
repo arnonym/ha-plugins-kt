@@ -128,4 +128,41 @@ class GlobalOptionsTest {
         options.mqttTopic shouldBe "custom/execute"
         options.mqttStateTopic shouldBe "custom/state"
     }
+
+    @Test
+    fun `parse sdp defaults`() {
+        val options = GlobalOptions.parse("")
+        options.codecs shouldBe emptyList()
+        options.textMedia shouldBe false
+    }
+
+    @Test
+    fun `parse codec list`() {
+        GlobalOptions.parse("--codecs PCMU,PCMA").codecs shouldBe listOf("PCMU", "PCMA")
+    }
+
+    @Test
+    fun `parse codec list drops empty entries`() {
+        // The option string is split on whitespace only, so a stray comma is the kind of
+        // typo that reaches the parser intact.
+        GlobalOptions.parse("--codecs=PCMU,,PCMA").codecs shouldBe listOf("PCMU", "PCMA")
+    }
+
+    @Test
+    fun `parse text media enabled`() {
+        GlobalOptions.parse("--text-media enabled").textMedia shouldBe true
+    }
+
+    @Test
+    fun `parse text media disabled`() {
+        GlobalOptions.parse("--text-media=disabled").textMedia shouldBe false
+    }
+
+    @Test
+    fun `parse sdp options together`() {
+        val options = GlobalOptions.parse("--codecs PCMU,PCMA --text-media enabled --rtp-port 5000")
+        options.codecs shouldBe listOf("PCMU", "PCMA")
+        options.textMedia shouldBe true
+        options.rtpPort shouldBe 5000
+    }
 }

@@ -10,6 +10,14 @@ webhook JSON, MQTT topics, and command protocol). It is currently a separate tes
 channel (`ha-sip-kt`), not the production add-on. See the main repo's `PLAN.md` for
 the architecture and a source-level compatibility audit against the Python original.
 
+Beyond parity, this port adds:
+
+- `--codecs` in `global_options`, to keep the INVITE inside one UDP datagram for providers
+  that drop IP fragments and refuse TCP; `m=text` (RFC 4103) is now left out of the SDP
+  unless `--text-media enabled` is passed
+- a `dial` to an unusable SIP URI no longer leaves a phantom call in the registry (which
+  then fired a `ring_timeout` webhook for a call that never rang)
+
 ## 5.6
 
 - Allow to specify a SIP status code in the `hangup` command for unanswered calls

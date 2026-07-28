@@ -23,6 +23,8 @@ data class GlobalOptions(
     val mqttPassword: String,
     val mqttTopic: String,
     val mqttStateTopic: String,
+    val codecs: List<String>,
+    val textMedia: Boolean,
 ) {
     companion object {
         fun parse(raw: String?): GlobalOptions {
@@ -43,6 +45,8 @@ data class GlobalOptions(
                 mqttPassword = cmd.mqttPassword,
                 mqttTopic = cmd.mqttTopic,
                 mqttStateTopic = cmd.mqttStateTopic,
+                codecs = cmd.codecs?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList(),
+                textMedia = cmd.textMedia,
             ).also { it.logSummary() }
         }
 
@@ -56,6 +60,8 @@ data class GlobalOptions(
         log(null, "TLS Enabled: $enableTls")
         log(null, "TLS Port: $tlsPort")
         log(null, "RTP Port: $rtpPort")
+        if (codecs.isNotEmpty()) log(null, "Offered codecs limited to: ${codecs.joinToString(", ")}")
+        if (textMedia) log(null, "Text media (m=text) enabled")
         log(null, "MQTT Enabled: $enableMqtt")
         if (enableMqtt) {
             log(null, "MQTT Address: $mqttAddress")
@@ -97,6 +103,17 @@ private class GlobalOptionsCmd : NoOpCliktCommand(name = "global_options") {
     val debugHeaders: Boolean by option(
         "--debug-headers",
         help = "Enable debug printing of extracted SIP headers (default: disabled)",
+    ).choice(BOOL_MAP).default(false)
+    val codecs: String? by option(
+        "--codecs",
+        help =
+            "Comma-separated list of audio codecs to offer, highest priority first, e.g. " +
+                "\"PCMU,PCMA\".",
+    )
+    val textMedia: Boolean by option(
+        "--text-media",
+        help =
+            "Enable or disable the \"m=text\" (RFC 4103) line in the SDP. (default: disabled)",
     ).choice(BOOL_MAP).default(false)
     val enableMqtt: Boolean by option(
         "--enable-mqtt",

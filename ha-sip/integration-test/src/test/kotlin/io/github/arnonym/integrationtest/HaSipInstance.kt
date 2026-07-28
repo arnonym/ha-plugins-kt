@@ -69,6 +69,9 @@ class HaSipInstance(
     /** Index into the log, for [awaitLog] calls that must ignore everything logged so far. */
     fun logMark(): Int = logLines.size
 
+    /** Everything logged since [from], for assertions that need the lines and not just a match. */
+    fun logLinesFrom(from: Int): List<String> = logLines.drop(from)
+
     /** Blocks until a log line matching [regex] appears at or after [from]. */
     fun awaitLog(
         regex: Regex,

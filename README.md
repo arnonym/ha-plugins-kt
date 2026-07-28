@@ -107,6 +107,12 @@ webhook:
   --rtp-port RTP_PORT   First port used for RTP/RTCP media sockets (default: 4000)
   --debug-headers {enabled,enable,true,yes,on,1,disabled,disable,false,no,off,0}
                         Enable debug printing of all available SIP headers (default: disabled)
+  --codecs CODECS       Comma-separated list of audio codecs to offer, highest priority
+                        first, e.g. "PCMU,PCMA".
+                        (default: offer everything pjsip supports)
+  --text-media {enabled,enable,true,yes,on,1,disabled,disable,false,no,off,0}
+                        Enable or disable the "m=text" (RFC 4103) line in the SDP.
+                        (default: disabled)
   --enable-mqtt         Enable MQTT as a command source (default: disabled)
   --mqtt-address MQTT_ADDRESS
                         MQTT broker address (default: empty)
