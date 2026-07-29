@@ -163,7 +163,7 @@ webhook:
 ## Usage
 
 > **Note:**
-> All examples below use `YOUR_ADDON_SLUG` as a placeholder for the `addon:` field. Look
+> All examples below use `9cd97bc4_ha-sip-kt` as a placeholder for the `addon:` field. Look
 > up the real value in Home Assistant under Settings → Add-ons → ha-sip (Kotlin) →
 > Info, or Developer Tools → Actions (search for `hassio.addon_stdin` and check the
 > `addon` field's autocomplete) — it's a `<repository_hash>_ha-sip-kt` style id assigned
@@ -181,7 +181,7 @@ your automation:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: dial
         number: sip:**620@fritz.box # number to call. Format depends on your SIP provider,
@@ -208,7 +208,7 @@ If there is already an outgoing call to the same number active, the request will
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: hangup
         number: sip:**620@fritz.box
@@ -222,7 +222,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: send_dtmf
         number: sip:**620@fritz.box
@@ -241,7 +241,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: transfer
         number: sip:**620@fritz.box
@@ -253,7 +253,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: bridge_audio
         number: sip:**620@fritz.box
@@ -265,7 +265,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: play_message
         number: sip:**620@fritz.box
@@ -284,7 +284,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: play_audio_file
         number: sip:**620@fritz.box
@@ -301,7 +301,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: stop_playback
         number: sip:**620@fritz.box
@@ -312,7 +312,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: start_recording
         number: sip:**620@fritz.box
@@ -327,7 +327,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: stop_recording
         number: sip:**620@fritz.box
@@ -362,7 +362,7 @@ You can also answer an incoming call from home assistant by using the `hassio.ad
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: answer
         number: "{{ trigger.json.internal_id }}" # if this is unclear, you can look that up in the logs ("Registering call with id <number>")
@@ -776,7 +776,7 @@ This will log all SIP headers for each incoming and outgoing call to help you id
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: dial
         number: sip:**620@fritz.box
@@ -811,7 +811,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: dial
         number: sip:**620@fritz.box
@@ -826,7 +826,7 @@ data:
 ```yaml
 service: hassio.addon_stdin
 data:
-    addon: YOUR_ADDON_SLUG
+    addon: 9cd97bc4_ha-sip-kt
     input:
         command: dial
         number: sip:**620@fritz.box
