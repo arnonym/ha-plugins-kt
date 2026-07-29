@@ -54,6 +54,7 @@ class Account(
         val credentials = AuthCredInfo("digest", config.realm, config.userName, 0, config.password)
         accountConfig.sipConfig.authCreds.add(credentials)
         accountConfig.mediaConfig.transportConfig.port = config.globalOptions.rtpPort.toLong()
+        accountConfig.mediaConfig.transportConfig.portRange = config.globalOptions.rtpPortRange.toLong()
         accountConfig.natConfig.iceEnabled = config.options.enableIce
         accountConfig.natConfig.contactRewriteUse = if (config.options.contactRewriteUse) 1 else 0
         accountConfig.natConfig.viaRewriteUse = if (config.options.viaRewriteUse) 1 else 0

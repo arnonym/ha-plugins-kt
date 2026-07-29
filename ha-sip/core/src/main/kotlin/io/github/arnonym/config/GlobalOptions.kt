@@ -15,6 +15,7 @@ data class GlobalOptions(
     val enableTls: Boolean,
     val tlsPort: Int,
     val rtpPort: Int,
+    val rtpPortRange: Int,
     val debugHeaders: Boolean,
     val enableMqtt: Boolean,
     val mqttAddress: String,
@@ -37,6 +38,7 @@ data class GlobalOptions(
                 enableTls = cmd.enableTls,
                 tlsPort = cmd.tlsPort,
                 rtpPort = cmd.rtpPort,
+                rtpPortRange = cmd.rtpPortRange,
                 debugHeaders = cmd.debugHeaders,
                 enableMqtt = cmd.enableMqtt,
                 mqttAddress = cmd.mqttAddress,
@@ -59,7 +61,10 @@ data class GlobalOptions(
         log(null, "TCP Enabled: $enableTcp")
         log(null, "TLS Enabled: $enableTls")
         log(null, "TLS Port: $tlsPort")
-        log(null, "RTP Port: $rtpPort")
+        log(
+            null,
+            if (rtpPortRange > 0) "RTP Port: $rtpPort-${rtpPort + rtpPortRange}" else "RTP Port: $rtpPort",
+        )
         if (codecs.isNotEmpty()) log(null, "Offered codecs limited to: ${codecs.joinToString(", ")}")
         if (textMedia) log(null, "Text media (m=text) enabled")
         log(null, "MQTT Enabled: $enableMqtt")
@@ -100,6 +105,13 @@ private class GlobalOptionsCmd : NoOpCliktCommand(name = "global_options") {
         // 4000 restates pjsip's own default (DEFAULT_RTP_PORT in pjsua_core.c, applied by
         // `pjsua_acc_config_default`), so passing it through unconditionally changes nothing.
     ).int().default(4000)
+    val rtpPortRange: Int by option(
+        "--rtp-port-range",
+        help =
+            "Number of additional ports usable for RTP/RTCP media sockets, starting at " +
+                "--rtp-port, e.g. a range of 100 with the default --rtp-port allows " +
+                "4000-4100 (default: 0, i.e. only --rtp-port itself is used).",
+    ).int().default(0)
     val debugHeaders: Boolean by option(
         "--debug-headers",
         help = "Enable debug printing of extracted SIP headers (default: disabled)",

@@ -81,6 +81,23 @@ class GlobalOptionsTest {
     }
 
     @Test
+    fun `parse rtp port range default`() {
+        GlobalOptions.parse("").rtpPortRange shouldBe 0
+    }
+
+    @Test
+    fun `parse rtp port range`() {
+        GlobalOptions.parse("--rtp-port-range 100").rtpPortRange shouldBe 100
+    }
+
+    @Test
+    fun `parse rtp port range alongside rtp port`() {
+        val options = GlobalOptions.parse("--rtp-port 5000 --rtp-port-range 200")
+        options.rtpPort shouldBe 5000
+        options.rtpPortRange shouldBe 200
+    }
+
+    @Test
     fun `parse debug headers default`() {
         GlobalOptions.parse("").debugHeaders shouldBe false
     }

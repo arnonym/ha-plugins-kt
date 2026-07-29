@@ -2,21 +2,13 @@
 
 If you find ha-sip useful, consider starring ⭐ the [GitHub repo](https://github.com/arnonym/ha-plugins)!
 
-## Kotlin/JVM port (this repository, `ha-plugins-kt`)
+## 10.0
 
-This add-on is a from-scratch Kotlin/JVM reimplementation of the Python `ha-sip`
-add-on below, targeting behavioral parity through version 5.6 (same config schema,
-webhook JSON, MQTT topics, and command protocol). It is currently a separate testing
-channel (`ha-sip-kt`), not the production add-on. See the main repo's `PLAN.md` for
-the architecture and a source-level compatibility audit against the Python original.
-
-Beyond parity, this port adds:
-
-- `--codecs` in `global_options`, to keep the INVITE inside one UDP datagram for providers
-  that drop IP fragments and refuse TCP; `m=text` (RFC 4103) is now left out of the SDP
-  unless `--text-media enabled` is passed
-- a `dial` to an unusable SIP URI no longer leaves a phantom call in the registry (which
-  then fired a `ring_timeout` webhook for a call that never rang)
+- Ported to Kotlin to overcome single thread limitations of Python which caused issues
+  with e.g. recordings.
+- Fix crash when using wrong SIP URI format
+- Allow disabling of unused codecs
+- Allow specifying an RTP port range in `global_options` via `--rtp-port-range`
 
 ## 5.6
 

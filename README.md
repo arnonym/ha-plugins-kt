@@ -105,6 +105,11 @@ webhook:
                         Enable or disable TLS transport (default: disabled)
   --tls-port TLS_PORT   Port to use for TLS transport (default: 5061)
   --rtp-port RTP_PORT   First port used for RTP/RTCP media sockets (default: 4000)
+  --rtp-port-range RTP_PORT_RANGE
+                        Number of additional ports usable for RTP/RTCP media sockets,
+                        starting at --rtp-port, e.g. a range of 100 with the default
+                        --rtp-port allows 4000-4100 (default: 0, i.e. only --rtp-port
+                        itself is used).
   --debug-headers {enabled,enable,true,yes,on,1,disabled,disable,false,no,off,0}
                         Enable debug printing of all available SIP headers (default: disabled)
   --codecs CODECS       Comma-separated list of audio codecs to offer, highest priority
