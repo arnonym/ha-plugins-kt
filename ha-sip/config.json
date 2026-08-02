@@ -1,6 +1,6 @@
 {
     "name": "ha-sip-kt",
-    "version": "10.0-alpha2",
+    "version": "10.0-alpha3",
     "slug": "ha-sip-kt",
     "url": "https://github.com/arnonym/ha-plugins-kt",
     "description": "Home-Assistant SIP Gateway (Kotlin/JVM port, for testing)",

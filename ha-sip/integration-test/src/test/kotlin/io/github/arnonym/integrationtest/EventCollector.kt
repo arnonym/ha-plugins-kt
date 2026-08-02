@@ -35,7 +35,7 @@ data class ReceivedEvent(
 }
 
 /**
- * Captures every [io.github.arnonym.event.WebhookEvent] emitted by the instances
+ * Captures every [io.github.arnonym.event.Event] emitted by the instances
  * under test.
  *
  * ha-sip's Home Assistant webhook channel is a plain `POST $HA_BASE_URL/webhook/$HA_WEBHOOK_ID`
@@ -47,13 +47,17 @@ class EventCollector : Closeable {
     private val received = CopyOnWriteArrayList<ReceivedEvent>()
     private val monitor = Object()
 
+    /** Arrival time of the most recent event, surviving [clear] so [awaitQuiet] can use it. */
+    @Volatile
+    private var lastEventAtMillis = 0L
+
     private val server: HttpServer =
         HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             // NOT the default (null) executor: that one serves requests on the single
-            // dispatcher thread, one at a time. `EventSender.sendEvent` fans out
-            // synchronously on the emitting thread and `triggerWebhook` blocks in
-            // `runBlocking { post }`, so a serial server would couple the two instances'
-            // timing -- corrupting the very measurements these tests exist to take.
+            // dispatcher thread, one at a time. Each ha-sip instance delivers its events
+            // from one `EventSender` thread that blocks in `runBlocking { post }`, so a
+            // serial server here would serialize the two instances against *each other* --
+            // corrupting the very measurements these tests exist to take.
             executor = Executors.newCachedThreadPool { r -> Thread(r, "event-collector").apply { isDaemon = true } }
             // Anything that is not a webhook (tts_get_url, template, services, ...):
             // answer immediately, so a stray call fails fast instead of parking a call's
@@ -141,6 +145,7 @@ class EventCollector : Closeable {
             } else {
                 val event = ReceivedEvent(instance, System.currentTimeMillis(), payload)
                 received.add(event)
+                lastEventAtMillis = event.receivedAtMillis
                 if (VERBOSE) println("  << $event")
                 synchronized(monitor) { monitor.notifyAll() }
             }
@@ -156,6 +161,34 @@ class EventCollector : Closeable {
     fun clear() {
         received.clear()
         ttsRequests.set(0)
+    }
+
+    /**
+     * Waits until nothing has arrived for [quietMillis], or gives up after [timeout].
+     *
+     * ha-sip delivers events asynchronously, and `call_disconnected` is *queued* just
+     * before the call leaves its registry -- so "the instance reports no active calls"
+     * does not mean "no events are still in flight". Clearing on that signal alone drops
+     * a straggler into the next scenario's history, where it reads as an event emitted
+     * after the disconnect and fails a scenario that did nothing wrong.
+     *
+     * Not a fixed sleep: quiet is usually reached on the first check, since delivery is a
+     * loopback POST.
+     */
+    fun awaitQuiet(
+        quietMillis: Long = QUIET_MILLIS,
+        timeout: Duration = DEFAULT_TIMEOUT,
+    ) {
+        val deadline = System.nanoTime() + timeout.toNanos()
+        while (true) {
+            val sinceLastEvent = System.currentTimeMillis() - lastEventAtMillis
+            if (sinceLastEvent >= quietMillis) return
+            if (System.nanoTime() >= deadline) {
+                System.err.println("event-collector: events still arriving after ${timeout.toMillis()}ms, giving up on quiet")
+                return
+            }
+            Thread.sleep((quietMillis - sinceLastEvent).coerceIn(1, quietMillis))
+        }
     }
 
     /**
@@ -235,6 +268,9 @@ class EventCollector : Closeable {
 
     companion object {
         val DEFAULT_TIMEOUT: Duration = Duration.ofSeconds(20)
+
+        /** Long enough to cover a loopback POST several times over, short enough to pay per scenario. */
+        private const val QUIET_MILLIS = 150L
         private val VERBOSE = System.getProperty("hasip.verbose") == "true"
 
         /** True when [expected] appears as a (not necessarily contiguous) subsequence of [actual]. */

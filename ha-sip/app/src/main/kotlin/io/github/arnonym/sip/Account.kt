@@ -6,9 +6,9 @@ import io.github.arnonym.config.Constants
 import io.github.arnonym.config.GlobalOptions
 import io.github.arnonym.config.SipOptions
 import io.github.arnonym.config.TurnConnectionType
+import io.github.arnonym.event.Event
 import io.github.arnonym.event.EventSender
-import io.github.arnonym.event.WebhookEvent
-import io.github.arnonym.event.triggerWebhook
+import io.github.arnonym.event.sendEvent
 import io.github.arnonym.ha.HaClient
 import io.github.arnonym.ha.HaConfig
 import io.github.arnonym.log.log
@@ -127,8 +127,8 @@ class Account(
         if (!blockedNumbers.isNullOrEmpty()) log(config.index, "Blocked numbers: $blockedNumbers")
         log(config.index, "Answer mode: ${answerMode.name}")
         incomingCall.accept(answerMode, answerAfter)
-        triggerWebhook(
-            WebhookEvent.IncomingCall,
+        sendEvent(
+            Event.IncomingCall,
             callInfo,
             config.index,
             incomingCall.callbackId,

@@ -143,6 +143,7 @@ object DirectIpStack {
         calleeInstance?.takeIf { it.isAlive }?.hangupAllRegisteredCalls()
         caller.awaitNoActiveCalls()
         calleeInstance?.takeIf { it.isAlive }?.awaitNoActiveCalls()
+        collector.awaitQuiet()
         collector.clear()
         collector.ttsAudio = null
         collector.stallTts(0)

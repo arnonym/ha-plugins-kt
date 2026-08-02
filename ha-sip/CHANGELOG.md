@@ -8,7 +8,7 @@ If you find ha-sip useful, consider starring ⭐ the [GitHub repo](https://githu
   with e.g. recordings.
 - Fix crash when using wrong SIP URI format
 - Allow disabling of unused codecs
-- Allow specifying an RTP port range in `global_options` via `--rtp-port-range`
+- Allow specifying a RTP port range in `global_options` via `--rtp-port-range`
 
 ## 5.6
 

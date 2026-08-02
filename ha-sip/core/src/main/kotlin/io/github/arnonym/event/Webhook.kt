@@ -63,7 +63,7 @@ data class WebhookToCall(
 }
 
 fun buildWebhookEnvelope(
-    event: WebhookEvent,
+    event: Event,
     callInfo: CallInfo?,
     sipAccount: Int?,
     internalId: String,
@@ -91,8 +91,8 @@ private fun JsonObjectBuilder.putHeaders(headers: Map<String, String?>) {
     put("headers", buildJsonObject { headers.forEach { (key, value) -> put(key, value) } })
 }
 
-fun triggerWebhook(
-    event: WebhookEvent,
+fun sendEvent(
+    event: Event,
     callInfo: CallInfo?,
     sipAccount: Int?,
     internalId: String,
@@ -103,7 +103,6 @@ fun triggerWebhook(
     val additionalWebhook = webhooks?.forEventName(event.eventName)
     if (additionalWebhook != null) {
         log(sipAccount, "Calling additional webhook $additionalWebhook for event ${event.eventName}")
-        eventSender.sendEvent(envelope, additionalWebhook)
     }
-    eventSender.sendEvent(envelope)
+    eventSender.sendEvent(envelope, additionalWebhook)
 }

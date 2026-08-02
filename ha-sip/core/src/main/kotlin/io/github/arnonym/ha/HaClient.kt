@@ -10,6 +10,7 @@ import io.github.arnonym.log.log
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
@@ -41,6 +42,18 @@ data class TtsResult(val fileName: String, val mustBeDeleted: Boolean, val wasSu
 
 private val ttsThreadCounter = AtomicInteger()
 
+/**
+ * Deadlines for everything we ask of Home Assistant, replacing the CIO engine's own 15 s
+ * default -- which is longer than any of these calls has a right to take, and is inherited
+ * silently enough that it reads like "no timeout" at every call site.
+ *
+ * These also bound the startup TTS diagnostic, which is the one caller that blocks the
+ * main thread: its `incoming.receive()` against a Home Assistant that accepts the
+ * connection and then says nothing would otherwise hang startup forever.
+ */
+private const val REQUEST_TIMEOUT_MILLIS = 30_000L
+private const val CONNECT_TIMEOUT_MILLIS = 5_000L
+
 class HaClient(private val config: HaConfig) : AutoCloseable {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -48,9 +61,19 @@ class HaClient(private val config: HaConfig) : AutoCloseable {
         HttpClient(CIO) {
             install(ContentNegotiation) { json(json) }
             install(WebSockets)
+            install(HttpTimeout) {
+                requestTimeoutMillis = REQUEST_TIMEOUT_MILLIS
+                connectTimeoutMillis = CONNECT_TIMEOUT_MILLIS
+            }
         }
 
-    private val rawHttpClient = HttpClient(CIO)
+    private val rawHttpClient =
+        HttpClient(CIO) {
+            install(HttpTimeout) {
+                requestTimeoutMillis = REQUEST_TIMEOUT_MILLIS
+                connectTimeoutMillis = CONNECT_TIMEOUT_MILLIS
+            }
+        }
 
     /**
      * Runs TTS fetches off the caller's thread. Deliberately a plain pool of daemon

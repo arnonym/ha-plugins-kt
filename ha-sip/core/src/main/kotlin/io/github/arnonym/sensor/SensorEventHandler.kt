@@ -3,9 +3,10 @@ package io.github.arnonym.sensor
 import io.github.arnonym.json.intValueOrNull
 import io.github.arnonym.json.stringValueOrNull
 import kotlinx.serialization.json.JsonObject
+import java.util.concurrent.ConcurrentHashMap
 
 class SensorEventHandler(private val sensorUpdater: SensorUpdates) {
-    private val callDirections = mutableMapOf<Int, String>()
+    private val callDirections = ConcurrentHashMap<Int, String>()
 
     fun handleEvent(event: JsonObject) {
         val eventType = event["event"]?.stringValueOrNull()

@@ -172,12 +172,6 @@ private fun startStdinReader(
     }
 }
 
-/**
- * Starts the 10 ms housekeeping tick that drives every live call's state machine.
- *
- * Runs on a single thread registered with pjsip, because the transitions it performs
- * (answer, hangup, starting a player) call into pjsua2.
- */
 private fun startCallTicker(
     endpoint: Endpoint,
     callRegistry: CallRegistry<Call>,
@@ -287,7 +281,6 @@ fun main(args: Array<String>) {
             MqttClient(
                 globalOptions,
                 onCommand = { command ->
-                    // Arrives on a HiveMQ Netty thread, which may then call into pjsua2.
                     endpoint.registerCurrentThread()
                     try {
                         commandHandler.handleCommand(command, null)
@@ -300,7 +293,10 @@ fun main(args: Array<String>) {
             null
         }
 
-    eventSender.registerSender { event, webhookId -> haClient.triggerWebhook(event, webhookId) }
+    eventSender.registerSender { event, additionalWebhookId ->
+        haClient.triggerWebhook(event)
+        if (additionalWebhookId != null) haClient.triggerWebhook(event, additionalWebhookId)
+    }
     eventSender.registerSender { event, _ -> mqttClient?.sendEvent(event) }
     val sensorEventHandler = SensorEventHandler(sensorUpdater)
     eventSender.registerSender { event, _ -> sensorEventHandler.handleEvent(event) }
@@ -309,20 +305,14 @@ fun main(args: Array<String>) {
     startStdinReader(endpoint, commandHandler)
     val eventsExecutor = startCallTicker(endpoint, callRegistry)
 
-    // Single deterministic "we are up" marker, emitted once everything that can
-    // accept work (SIP transports, accounts, MQTT, stdin) has been wired up. The
-    // integration-test harness waits for exactly this line before driving calls.
     log(null, "ha-sip started, listening on port ${endpointConfig.port}")
 
-    // Blocks until a `quit` command arrives. That command runs on the stdin or MQTT
-    // thread, and `libDestroy()` should not be called from one of those -- so it hands
-    // shutdown back here, to the main thread pjsua registered during `libCreate()`.
     shutdownLatch.await()
 
     log(null, "Shutting down.")
-    // Ticker first: guarantees it is not inside a pjsua2 call when the library goes away.
     eventsExecutor.shutdown()
     eventsExecutor.awaitTermination(5, TimeUnit.SECONDS)
+    eventSender.close()
     mqttClient?.disconnect()
     endpoint.libDestroy()
     exitProcess(0)

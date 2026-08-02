@@ -5,9 +5,9 @@ sealed class CurrentPlayback {
 
     data class AudioFile(val audioFile: String) : CurrentPlayback()
 
-    fun toPlaybackDoneEvent(): WebhookEvent =
+    fun toPlaybackDoneEvent(): Event =
         when (this) {
-            is Message -> WebhookEvent.PlaybackDoneMessage(message)
-            is AudioFile -> WebhookEvent.PlaybackDoneAudioFile(audioFile)
+            is Message -> Event.PlaybackDoneMessage(message)
+            is AudioFile -> Event.PlaybackDoneAudioFile(audioFile)
         }
 }

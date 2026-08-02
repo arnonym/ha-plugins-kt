@@ -93,17 +93,6 @@ private fun Endpoint.applyCodecPriorities(
     log(null, "Offering audio codecs: ${enabled.joinToString(", ")}")
 }
 
-/**
- * Registers the current thread with pjsip, once.
- *
- * Any thread of ours that calls into pjsua2 -- the call-events ticker, the stdin reader,
- * the MQTT client's Netty threads -- has to be known to pjsip first, otherwise the call
- * aborts on an assertion inside the library.
- *
- * The `libIsThreadRegistered` guard matters: `libRegisterThread` allocates a
- * `pj_thread_desc` that is only freed at `libDestroy()`, so registering the same thread
- * repeatedly (the MQTT callback runs on a rotating pool) would leak one per call.
- */
 fun Endpoint.registerCurrentThread() {
     try {
         if (!libIsThreadRegistered()) libRegisterThread(Thread.currentThread().name)

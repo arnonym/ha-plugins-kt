@@ -4,32 +4,32 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 
-sealed class WebhookEvent(val eventName: String) {
+sealed class Event(val eventName: String) {
     open fun extraFields(): Map<String, JsonElement> = emptyMap()
 
-    data object IncomingCall : WebhookEvent("incoming_call")
+    data object IncomingCall : Event("incoming_call")
 
-    data object OutgoingCallInitiated : WebhookEvent("outgoing_call_initiated")
+    data object OutgoingCallInitiated : Event("outgoing_call_initiated")
 
-    data object CallEstablished : WebhookEvent("call_established")
+    data object CallEstablished : Event("call_established")
 
-    data object CallDisconnected : WebhookEvent("call_disconnected")
+    data object CallDisconnected : Event("call_disconnected")
 
-    data object RingTimeout : WebhookEvent("ring_timeout")
+    data object RingTimeout : Event("ring_timeout")
 
-    data class EnteredMenu(val menuId: String) : WebhookEvent("entered_menu") {
+    data class EnteredMenu(val menuId: String) : Event("entered_menu") {
         override fun extraFields() = mapOf("menu_id" to JsonPrimitive(menuId))
     }
 
-    data class DtmfDigit(val digit: String) : WebhookEvent("dtmf_digit") {
+    data class DtmfDigit(val digit: String) : Event("dtmf_digit") {
         override fun extraFields() = mapOf("digit" to JsonPrimitive(digit))
     }
 
-    data class Timeout(val menuId: String?) : WebhookEvent("timeout") {
+    data class Timeout(val menuId: String?) : Event("timeout") {
         override fun extraFields() = mapOf("menu_id" to (menuId?.let { JsonPrimitive(it) } ?: JsonNull))
     }
 
-    data class PlaybackDoneAudioFile(val audioFile: String) : WebhookEvent("playback_done") {
+    data class PlaybackDoneAudioFile(val audioFile: String) : Event("playback_done") {
         override fun extraFields() =
             mapOf(
                 "type" to JsonPrimitive("audio_file"),
@@ -37,7 +37,7 @@ sealed class WebhookEvent(val eventName: String) {
             )
     }
 
-    data class PlaybackDoneMessage(val message: String) : WebhookEvent("playback_done") {
+    data class PlaybackDoneMessage(val message: String) : Event("playback_done") {
         override fun extraFields() =
             mapOf(
                 "type" to JsonPrimitive("message"),
@@ -45,11 +45,11 @@ sealed class WebhookEvent(val eventName: String) {
             )
     }
 
-    data class RecordingStarted(val recordingFile: String) : WebhookEvent("recording_started") {
+    data class RecordingStarted(val recordingFile: String) : Event("recording_started") {
         override fun extraFields() = mapOf("recording_file" to JsonPrimitive(recordingFile))
     }
 
-    data class RecordingStopped(val recordingFile: String) : WebhookEvent("recording_stopped") {
+    data class RecordingStopped(val recordingFile: String) : Event("recording_stopped") {
         override fun extraFields() = mapOf("recording_file" to JsonPrimitive(recordingFile))
     }
 }

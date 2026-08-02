@@ -12,10 +12,10 @@ import io.github.arnonym.config.Constants
 import io.github.arnonym.event.CallDirection
 import io.github.arnonym.event.CallInfo
 import io.github.arnonym.event.CurrentPlayback
+import io.github.arnonym.event.Event
 import io.github.arnonym.event.EventSender
-import io.github.arnonym.event.WebhookEvent
 import io.github.arnonym.event.WebhookToCall
-import io.github.arnonym.event.triggerWebhook
+import io.github.arnonym.event.sendEvent
 import io.github.arnonym.ha.HaClient
 import io.github.arnonym.ha.HaConfig
 import io.github.arnonym.ha.TtsResult
@@ -78,7 +78,7 @@ fun makeCall(
         CallDisposal.enqueue(newCall)
         return null
     }
-    newCall.triggerWebhookEvent(WebhookEvent.OutgoingCallInitiated)
+    newCall.sendEvent(Event.OutgoingCallInitiated)
     return newCall
 }
 
@@ -97,40 +97,16 @@ class Call(
     private var webhooks: WebhookToCall?,
     private var sipHeaders: Map<String, String?> = emptyMap(),
 ) : PjCall(account, callId), CallHandle {
-    /**
-     * Guards this call's mutable state.
-     *
-     * Lock-ordering rule, and it is not optional: **pjsua2 call operations must never
-     * be invoked while this lock is held.** pjsip delivers `onCallState`,
-     * `onCallMediaState` and `onDtmfDigit` from its own worker threads *while holding
-     * the dialog lock*, and those callbacks then take this lock. A thread that holds
-     * this lock and calls `answer`/`hangup`/`xfer`/`sendDtmf` -- each of which needs
-     * the dialog lock via pjsua's `acquire_call()` -- inverts that order. The result is
-     * a deadlock broken only by pjsua's 2 s acquire timeout, which then *drops the
-     * operation*: an incoming call that loses its `200 OK` this way never connects.
-     *
-     * So nothing calls pjsua2 under this lock. Queue it with [deferSipCall] instead; the
-     * tick runs the queue in [handleEvents], outside the lock and on a thread pjsip knows
-     * about. That the *tick* is the only drainer is the point -- it means no caller has to
-     * reason about whether it happens to be the outermost lock holder, or whether its own
-     * thread is one pjsip would accept, which is exactly what a TTS callback is not.
-     *
-     * The cost is that an `answer`/`hangup`/`xfer`/`sendDtmf` waits for the next tick, at
-     * most 10 ms. Against SIP timescales that is nothing.
-     */
     private val lock = ReentrantLock()
 
-    /** Every log line from a call is tagged with its account's index. */
     private fun log(message: String) = log(account.config.index, message)
 
     private val pendingSipCalls = mutableListOf<() -> Unit>()
 
-    /** Queues a pjsua2 call for the next tick to run. Caller must hold [lock]. */
     private fun deferSipCall(action: () -> Unit) {
         pendingSipCalls.add(action)
     }
 
-    /** Runs what [deferSipCall] queued. Called from the tick only, and never under [lock]. */
     private fun flushSipCalls() {
         while (true) {
             val next = lock.withLock { pendingSipCalls.removeFirstOrNull() } ?: return
@@ -162,18 +138,10 @@ class Call(
     private var answerAtMillis: Long? = null
     private var ringTimeoutFired = false
 
-    /** Set once this call is gone; its pjsua2 peer is destroyed later by [CallDisposal]. */
     private var disposed = false
 
-    /** A finished TTS fetch waiting for the tick to start playing it. */
     private var fetchedAudio: TtsResult? = null
 
-    /**
-     * Bumped whenever a pending TTS fetch stops being wanted -- a new prompt, an
-     * interruption, a disconnect. A fetch that lands under a stale generation is thrown
-     * away instead of played, which is how a prompt interrupted mid-synthesis stays
-     * interrupted.
-     */
     private var ttsGeneration = 0L
     private var callInfo: CallInfo? = null
     private val pressedDigitList = mutableListOf<String>()
@@ -195,14 +163,6 @@ class Call(
         commandHandler.registerCall(callbackId, this, otherIds)
     }
 
-    /**
-     * Periodic housekeeping tick -- called for every live call from the main loop.
-     *
-     * At most one state transition per tick, and the priority order is load-bearing:
-     * [onDtmfDigit] calls `stopPlayback()` (setting `playbackIsDone`) *before* enqueuing
-     * the digit, so pressing a key during a prompt that has a `post_action` runs the post
-     * action first, and the digit is then matched against the menu that results.
-     */
     fun handleEvents() {
         try {
             lock.withLock { tick() }
@@ -223,7 +183,7 @@ class Call(
             // takes a while to come back, so without it the tick re-fires the webhook
             // every 10 ms in the meantime.
             ringTimeoutFired = true
-            triggerWebhookEvent(WebhookEvent.RingTimeout)
+            sendEvent(Event.RingTimeout)
             log("Ring timeout of $ringTimeout triggered")
             hangupCall()
             return
@@ -250,7 +210,7 @@ class Call(
             log("Timeout of $timeoutSeconds triggered")
             menu?.let {
                 handleMenu(it.timeoutChoice)
-                triggerWebhookEvent(WebhookEvent.Timeout(it.id))
+                sendEvent(Event.Timeout(it.id))
             }
             return
         }
@@ -301,15 +261,15 @@ class Call(
         }
     }
 
-    fun triggerWebhookEvent(event: WebhookEvent) {
-        triggerWebhook(event, callInfo, account.config.index, callbackId, eventSender, webhooks)
+    fun sendEvent(event: Event) {
+        sendEvent(event, callInfo, account.config.index, callbackId, eventSender, webhooks)
     }
 
     private fun handleConnectedState() {
         log("Call is established.")
         connected = true
         resetTimeout()
-        triggerWebhookEvent(WebhookEvent.CallEstablished)
+        sendEvent(Event.CallEstablished)
         handleMenu(menu)
     }
 
@@ -330,7 +290,7 @@ class Call(
                 pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED -> {
                     log("Call disconnected (${ci.lastStatusCode} ${ci.lastReason})")
                     stopRecording()
-                    triggerWebhookEvent(WebhookEvent.CallDisconnected)
+                    sendEvent(Event.CallDisconnected)
                     discardPendingTts()
                     connected = false
                     callSettledAtMillis = null
@@ -390,7 +350,7 @@ class Call(
 
     private fun handleDtmfDigit(pressedDigit: String) {
         log("onDtmfDigit: digit $pressedDigit")
-        triggerWebhookEvent(WebhookEvent.DtmfDigit(pressedDigit))
+        sendEvent(Event.DtmfDigit(pressedDigit))
         val currentMenu = menu ?: return
         currentInput += pressedDigit
         log("Current input: $currentInput")
@@ -456,7 +416,7 @@ class Call(
         menu = newMenu
         val menuId = newMenu.id
         if (menuId != null && sendWebhookEvent) {
-            triggerWebhookEvent(WebhookEvent.EnteredMenu(menuId))
+            sendEvent(Event.EnteredMenu(menuId))
         }
         if (resetInput) currentInput = ""
         var message = newMenu.message
@@ -591,7 +551,7 @@ class Call(
     private fun onPlaybackDone(): Unit =
         lock.withLock {
             log("Playback done.")
-            currentPlayback?.let { triggerWebhookEvent(it.toPlaybackDoneEvent()) }
+            currentPlayback?.let { sendEvent(it.toPlaybackDoneEvent()) }
             currentPlayback = null
             playbackIsDone = true
             player = null
@@ -651,7 +611,7 @@ class Call(
             recorder = newRecorder
             this.recordingFile = recordingFile
             log("Call recording started: $recordingFile")
-            triggerWebhookEvent(WebhookEvent.RecordingStarted(recordingFile))
+            sendEvent(Event.RecordingStarted(recordingFile))
         }
 
     override fun stopRecording(): Unit =
@@ -665,7 +625,7 @@ class Call(
             }
             recordingFile?.let { file ->
                 log("Call recording stopped: $file")
-                triggerWebhookEvent(WebhookEvent.RecordingStopped(file))
+                sendEvent(Event.RecordingStopped(file))
             }
             recorder = null
             recordingFile = null
